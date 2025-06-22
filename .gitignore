@@ -1,0 +1,6 @@
+*
+
+!.gitignore
+!install.sh
+!shim.py
+!README.md
