@@ -1,6 +1,6 @@
-# UGOWShim
+# UGOW
 
-`UGOWShim` is a FUSE-based shim for Windows Subsystem for Linux (WSL) that extends the standard Unix permission model (User/Group/Other) with an additional **W-bit** controlling Windows-side write permissions per Linux UID. When a Linux user is granted the W-bit on a path, all write operations under that path are enforced by the shim and mirrored to NTFS ACLs on the Windows host.
+`UGOW` is a FUSE-based shim for Windows Subsystem for Linux (WSL) that extends the standard Unix permission model (User/Group/Other) with an additional **W-bit** controlling Windows-side write permissions per Linux UID. When a Linux user is granted the W-bit on a path, all write operations under that path are enforced by the shim and mirrored to NTFS ACLs on the Windows host.
 
 ---
 
@@ -28,7 +28,7 @@
 2. **Copy `shim.py`** into a system location:
 
    ```bash
-   sudo install -m 755 shim.py /usr/local/bin/ugowshim
+   sudo install -m 755 shim.py /usr/local/bin/ugow
    ```
 
 3. **Enable FUSE**:
@@ -54,7 +54,7 @@
 ### 1. Mount a drive
 
 ```bash
-ugowshim /mnt/c /mnt/c-shim \
+ugow /mnt/c /mnt/c-shim \
   -- foreground --allow_other --default_permissions
 ```
 
@@ -76,10 +76,10 @@ chmod -t /mnt/c-shim/data
 
 ```bash
 # Grant UID 9500 write rights on a specific path
-sudo ugowshim --grant 9500 /mnt/c-shim/userdata
+sudo ugow --grant 9500 /mnt/c-shim/userdata
 
 # Revoke
-sudo ugowshim --revoke 9500 /mnt/c-shim/userdata
+sudo ugow --revoke 9500 /mnt/c-shim/userdata
 ```
 
 ### 4. Using with Docker
