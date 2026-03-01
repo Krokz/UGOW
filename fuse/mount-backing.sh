@@ -7,7 +7,7 @@ BACKING="/mnt/.${LETTER}-backing"
 mountpoint -q "$BACKING" && exit 0
 
 for n in $(seq 1 5); do
-    mount -t drvfs "$(echo "$LETTER" | tr a-z A-Z):" "$BACKING" -o metadata && exit 0
+    mount -t drvfs "$(echo "$LETTER" | tr a-z A-Z):" "$BACKING" -o metadata,umask=077 && exit 0
     sleep 2
 done
 

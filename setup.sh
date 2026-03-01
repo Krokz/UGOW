@@ -322,14 +322,13 @@ After=local-fs.target
 
 [Service]
 Type=simple
-TimeoutStartSec=30
+TimeoutStartSec=60
 TimeoutStopSec=10
 ExecStartPre=-/bin/sh -c 'pkill -9 -f "[w]sl-fuse-shim.*/mnt/%i" 2>/dev/null; true'
 ExecStartPre=-/bin/umount -l /mnt/%i
 ExecStartPre=-/usr/bin/fusermount -uz /mnt/%i
 ExecStartPre=/bin/mkdir -p /mnt/.%i-backing /mnt/%i
 ExecStartPre=${UGOW_LIB}/mount-backing.sh %i
-ExecStartPre=-/bin/chmod 0700 /mnt/.%i-backing
 Environment=PYTHONPATH=${UGOW_LIB}
 ExecStart=${VE}/venv/bin/python ${SHIM_BIN} --launcher-uid ${REAL_UID} /mnt/.%i-backing /mnt/%i
 ExecStopPost=-/bin/sh -c 'fusermount -uz /mnt/%i 2>/dev/null; umount -l /mnt/%i 2>/dev/null; umount /mnt/.%i-backing 2>/dev/null; true'
