@@ -175,6 +175,7 @@ def cmd_allow(args):
     print(f"Allowed: {username} (uid={uid}) can write to {path}")
     if len(backends) > 1:
         print(f"  backends: {', '.join(backends)}")
+    store.flush_acl()
 
 
 def cmd_deny(args):
@@ -194,6 +195,7 @@ def cmd_deny(args):
     print(f"Denied: {username} (uid={uid}) can no longer write to {path}")
     if len(backends) > 1:
         print(f"  backends: {', '.join(backends)}")
+    store.flush_acl()
 
 
 def cmd_check(args):

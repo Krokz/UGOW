@@ -196,6 +196,11 @@ class PermStore:
             finally:
                 self._acl_queue.task_done()
 
+    def flush_acl(self):
+        """Block until all pending ACL operations have completed."""
+        if self._acl_queue is not None:
+            self._acl_queue.join()
+
     def cleanup_acl(self):
         """Remove Windows wsl_* users whose UID has zero grants in the DB."""
         active_uids = {
