@@ -204,6 +204,38 @@ for f in "$WSL_CONF" "$FUSE_CONF"; do
   fi
 done
 
+# ── Helper: update wsl.conf without clobbering user sections ──────────────
+
+_ugow_set_wsl_conf() {
+  local automount_enabled="$1"
+
+  sudo touch "$WSL_CONF"
+
+  # Ensure [automount] section exists and set enabled + options
+  if grep -q '^\[automount\]' "$WSL_CONF"; then
+    if grep -q '^enabled' "$WSL_CONF"; then
+      sudo sed -i "s/^enabled.*/enabled = $automount_enabled/" "$WSL_CONF"
+    else
+      sudo sed -i "/^\[automount\]/a enabled = $automount_enabled" "$WSL_CONF"
+    fi
+    if ! grep -q '^options' "$WSL_CONF"; then
+      sudo sed -i '/^\[automount\]/a options = "metadata"' "$WSL_CONF"
+    fi
+  else
+    printf '\n[automount]\nenabled = %s\noptions = "metadata"\n' \
+      "$automount_enabled" | sudo tee -a "$WSL_CONF" > /dev/null
+  fi
+
+  # Ensure [boot] section exists with systemd = true
+  if grep -q '^\[boot\]' "$WSL_CONF"; then
+    if ! grep -q '^systemd' "$WSL_CONF"; then
+      sudo sed -i '/^\[boot\]/a systemd = true' "$WSL_CONF"
+    fi
+  else
+    printf '\n[boot]\nsystemd = true\n' | sudo tee -a "$WSL_CONF" > /dev/null
+  fi
+}
+
 # ═══════════════════════════════════════════════════════════════════════════
 # Base install (always): CLI + permstore + venv
 # ═══════════════════════════════════════════════════════════════════════════
@@ -230,8 +262,7 @@ sudo chown root:root /var/lib/ugow
 
 if [ ! -d "$VE/venv" ]; then
   sudo mkdir -p "$VE"
-  sudo chown "$USER":"$USER" "$VE"
-  python3 -m venv "$VE/venv"
+  sudo python3 -m venv "$VE/venv"
 fi
 
 echo "  CLI installed: $UGOW_BIN"
@@ -261,9 +292,9 @@ if [[ "$MODE" == "fuse" ]]; then
   fi
 
   # Install fusepy into the venv
-  "$VE/venv/bin/pip" install --upgrade --quiet fusepy
+  sudo "$VE/venv/bin/pip" install --upgrade --quiet fusepy
 
-  # Install shim + permstore for the FUSE daemon
+  # Install shim + permstore + helper scripts for the FUSE daemon
   if [ -e "$SHIM_BIN" ] && ! grep -q '# Shim: UGOW' "$SHIM_BIN"; then
     echo "$SHIM_BIN exists and doesn't look like UGOW shim. Aborting." >&2
     exit 1
@@ -271,6 +302,7 @@ if [[ "$MODE" == "fuse" ]]; then
   sudo install -m 755 "$SCRIPT_DIR/shim.py" "$SHIM_BIN"
   echo "# Shim: UGOW" | sudo tee -a "$SHIM_BIN" >/dev/null
   sudo install -m 644 "$SCRIPT_DIR/permstore.py" "$UGOW_LIB/permstore.py"
+  sudo install -m 755 "$SCRIPT_DIR/mount-backing.sh" "$UGOW_LIB/mount-backing.sh"
 
   # Enable user_allow_other in /etc/fuse.conf
   if ! grep -q '^user_allow_other' "$FUSE_CONF"; then
@@ -279,14 +311,7 @@ if [[ "$MODE" == "fuse" ]]; then
   fi
 
   # Disable WSL automount so UGOW owns /mnt/*
-  sudo tee "$WSL_CONF" > /dev/null <<'WSLEOF'
-[automount]
-enabled = false
-options = "metadata"
-
-[boot]
-systemd = true
-WSLEOF
+  _ugow_set_wsl_conf "false"
   echo "  WSL automount disabled; UGOW will mount drives via FUSE."
 
   # Create the systemd template unit (one instance per drive letter)
@@ -299,11 +324,11 @@ After=local-fs.target
 Type=simple
 TimeoutStartSec=30
 TimeoutStopSec=10
-ExecStartPre=-/bin/sh -c 'pkill -9 -f "wsl-fuse-shim.*/mnt/%i" 2>/dev/null; true'
+ExecStartPre=-/bin/sh -c 'pkill -9 -f "[w]sl-fuse-shim.*/mnt/%i" 2>/dev/null; true'
 ExecStartPre=-/bin/umount -l /mnt/%i
 ExecStartPre=-/usr/bin/fusermount -uz /mnt/%i
 ExecStartPre=/bin/mkdir -p /mnt/.%i-backing /mnt/%i
-ExecStartPre=/bin/sh -c 'mountpoint -q /mnt/.%i-backing && exit 0; n=0; while [ \$n -lt 5 ]; do mount -t drvfs "\$(echo %i | tr a-z A-Z):" /mnt/.%i-backing -o metadata && exit 0; n=\$((n+1)); sleep 2; done; echo "drvfs mount failed after 5 attempts" >&2; exit 1'
+ExecStartPre=${UGOW_LIB}/mount-backing.sh %i
 ExecStartPre=-/bin/chmod 0700 /mnt/.%i-backing
 Environment=PYTHONPATH=${UGOW_LIB}
 ExecStart=${VE}/venv/bin/python ${SHIM_BIN} --launcher-uid ${REAL_UID} /mnt/.%i-backing /mnt/%i
@@ -324,7 +349,10 @@ EOF
   # Verify the service actually started
   echo ""
   echo "  Waiting for FUSE shim to start..."
-  sleep 3
+  for _try in 1 2 3 4 5; do
+    sleep 2
+    systemctl is-active --quiet wsl-fuse-shim@c.service && break
+  done
   if systemctl is-active --quiet wsl-fuse-shim@c.service; then
     cat <<'MSG'
 
@@ -393,14 +421,7 @@ if [[ "$MODE" == "bpf" ]]; then
   sudo install -m 644 "$SCRIPT_DIR/permstore.py" "$UGOW_LIB/permstore.py"
 
   # BPF mode does NOT disable automount -- enforce on the real mount
-  sudo tee "$WSL_CONF" > /dev/null <<'WSLEOF'
-[automount]
-enabled = true
-options = "metadata"
-
-[boot]
-systemd = true
-WSLEOF
+  _ugow_set_wsl_conf "true"
   echo "  WSL automount left enabled; BPF enforces on real /mnt/c."
 
   # Create the systemd unit for BPF
@@ -455,6 +476,6 @@ Installed mode: $MODE
 
 To rollback:
 
-  sudo ./install.sh --uninstall
+  sudo ./setup.sh --uninstall
 
 MSG
