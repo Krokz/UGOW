@@ -47,6 +47,22 @@ def path_to_win(path):
     return path
 
 
+def _check_windows_admin():
+    """Check if the current Windows session has Administrator privileges."""
+    ps = _find_powershell()
+    try:
+        r = subprocess.run(
+            [ps, "-Command",
+             "([Security.Principal.WindowsPrincipal]"
+             "[Security.Principal.WindowsIdentity]::GetCurrent())"
+             ".IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)"],
+            capture_output=True, text=True, timeout=10,
+        )
+        return r.returncode == 0 and r.stdout.strip() == "True"
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+
+
 def _path_ancestors(path):
     """Yield path and all its ancestor directories up to the root."""
     current = path
@@ -86,6 +102,11 @@ class PermStore:
 
         self._acl_queue = None
         if mirror_acl:
+            if not _check_windows_admin():
+                raise SystemExit(
+                    "Error: --mirror-acl requires Windows Administrator privileges.\n"
+                    "  Launch Windows Terminal as Administrator, then run 'wsl' and retry."
+                )
             self._acl_queue = queue.Queue()
             t = threading.Thread(target=self._acl_worker, daemon=True)
             t.start()
@@ -186,14 +207,14 @@ class PermStore:
                         f"if (-Not (Get-LocalUser -Name '{win_user}' "
                         f"-ErrorAction SilentlyContinue)) {{ "
                         f"New-LocalUser -Name '{win_user}' -NoPassword "
-                        f"-ErrorAction SilentlyContinue }}; "
+                        f"}}; "
                         f"icacls '{win_path}' /grant "
-                        f"'{win_user}:(OI)(CI)F' /T 2>$null"
+                        f"'{win_user}:(OI)(CI)F' /T"
                     )
                 elif action == "revoke":
                     ps = (
                         f"icacls '{win_path}' /remove "
-                        f"'{win_user}' /T 2>$null"
+                        f"'{win_user}' /T"
                     )
                 else:
                     continue
@@ -204,9 +225,10 @@ class PermStore:
                     text=True,
                 )
                 if result.returncode != 0:
+                    err = (result.stderr or result.stdout or "").strip()
                     log.warning(
                         "ACL mirror %s failed for %s (uid %d): %s",
-                        action, path, uid, result.stderr.strip(),
+                        action, path, uid, err,
                     )
             except Exception:
                 log.exception("ACL worker error")
