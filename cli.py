@@ -199,10 +199,14 @@ def cmd_deny(args):
 
 
 def cmd_check(args):
-    require_root("check")
     path = os.path.abspath(args.path)
-    uid = os.getuid()
-    username = uid_to_name(uid)
+
+    if hasattr(args, "user") and args.user:
+        require_root("check --user")
+        uid, username = resolve_user(args.user)
+    else:
+        uid = int(os.environ.get("SUDO_UID", os.getuid()))
+        username = uid_to_name(uid)
 
     store = PermStore(db_path=args.db, mirror_acl=False)
     has = store.has_wbit(path, uid)
@@ -312,7 +316,13 @@ def cmd_unmount(args):
             ["umount", f"/mnt/.{letter}-backing"],
             capture_output=True,
         )
+        subprocess.run(
+            ["mount", "-t", "drvfs", f"{letter.upper()}:",
+             f"/mnt/{letter}", "-o", "metadata"],
+            capture_output=True,
+        )
         print(f"\nDrive {letter.upper()}: is no longer managed by UGOW")
+        print(f"  Re-mounted as standard DrvFs at /mnt/{letter}")
     else:
         sys.exit(result.returncode)
 
@@ -377,6 +387,7 @@ def main():
 
     p = sub.add_parser("check", help="Check if you can write to a path")
     p.add_argument("path", help="Path to check")
+    p.add_argument("--user", default=None, help="Check a specific user (requires root)")
 
     p = sub.add_parser("status", help="Show who can write to a path")
     p.add_argument("path", help="Path to inspect")
