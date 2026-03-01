@@ -199,10 +199,10 @@ def cmd_deny(args):
 
 
 def cmd_check(args):
+    require_root("check")
     path = os.path.abspath(args.path)
 
     if hasattr(args, "user") and args.user:
-        require_root("check --user")
         uid, username = resolve_user(args.user)
     else:
         uid = int(os.environ.get("SUDO_UID", os.getuid()))
