@@ -89,16 +89,18 @@ BANNER
 
   # Stop and disable FUSE shim units, collecting drive letters
   managed_drives=()
-  for unit in $(systemctl list-units 'wsl-fuse-shim@*.service' \
-                --plain --no-legend 2>/dev/null | awk '{print $1}'); do
-    letter=$(echo "$unit" | sed 's/wsl-fuse-shim@\(.\)\.service/\1/')
-    managed_drives+=("$letter")
-    _spin "Stopping $unit" &
-    spin_pid=$!
-    sudo systemctl disable --now "$unit" 2>/dev/null || true
-    _spin_stop "$spin_pid" "Stopped $unit"
-  done
-  sudo rm -f /etc/systemd/system/wsl-fuse-shim@.service
+  if [[ -f /etc/systemd/system/wsl-fuse-shim@.service ]]; then
+    for unit in $(systemctl list-units 'wsl-fuse-shim@*.service' \
+                  --plain --no-legend 2>/dev/null | awk '{print $1}'); do
+      letter=$(echo "$unit" | sed 's/wsl-fuse-shim@\(.\)\.service/\1/')
+      managed_drives+=("$letter")
+      _spin "Stopping $unit" &
+      spin_pid=$!
+      sudo systemctl disable --now "$unit" 2>/dev/null || true
+      _spin_stop "$spin_pid" "Stopped $unit"
+    done
+    sudo rm -f /etc/systemd/system/wsl-fuse-shim@.service
+  fi
 
   # Stop and disable BPF unit
   if systemctl list-unit-files ugow-bpf.service &>/dev/null; then
