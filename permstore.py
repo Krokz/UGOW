@@ -6,6 +6,7 @@ Shared by the CLI, FUSE shim, and BPF manager. Has no dependency on fusepy.
 """
 
 import os
+import shutil
 import sqlite3
 import subprocess
 import logging
@@ -14,6 +15,22 @@ import time
 import queue
 
 DEFAULT_DB_PATH = "/var/lib/ugow/wperm.db"
+
+_POWERSHELL_SEARCH = [
+    "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe",
+    "/mnt/c/Windows/SysWOW64/WindowsPowerShell/v1.0/powershell.exe",
+]
+
+
+def _find_powershell():
+    """Locate powershell.exe, which sudo may hide by stripping Windows paths."""
+    found = shutil.which("powershell.exe")
+    if found:
+        return found
+    for p in _POWERSHELL_SEARCH:
+        if os.path.isfile(p):
+            return p
+    return "powershell.exe"
 
 _WBIT_CACHE_TTL = 2.0
 
@@ -182,7 +199,7 @@ class PermStore:
                     continue
 
                 result = subprocess.run(
-                    ["powershell.exe", "-Command", ps],
+                    [_find_powershell(), "-Command", ps],
                     capture_output=True,
                     text=True,
                 )
@@ -209,7 +226,7 @@ class PermStore:
         }
         result = subprocess.run(
             [
-                "powershell.exe", "-Command",
+                _find_powershell(), "-Command",
                 "Get-LocalUser | Where-Object { $_.Name -like 'wsl_*' } "
                 "| Select-Object -ExpandProperty Name",
             ],
@@ -231,7 +248,7 @@ class PermStore:
             if uid not in active_uids:
                 rm = subprocess.run(
                     [
-                        "powershell.exe", "-Command",
+                        _find_powershell(), "-Command",
                         f"Remove-LocalUser -Name '{name}' "
                         f"-ErrorAction SilentlyContinue",
                     ],
