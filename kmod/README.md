@@ -4,9 +4,13 @@ A Linux Security Module that enforces W-bit permissions directly in the kernel
 VFS layer for 9P (drvfs) mounts in WSL2. Unlike the FUSE shim, this cannot be
 bypassed from userspace.
 
-## Building
+> **Note:** This requires a custom WSL2 kernel build. For stock kernels, use
+> the [BPF mode](../bpf/README.md) instead -- it provides the same kernel-level
+> enforcement without a custom build.
 
-The LSM must be compiled into a custom WSL2 kernel.
+---
+
+## Building
 
 ### 1. Clone the WSL2 kernel
 
@@ -75,6 +79,8 @@ Restart WSL:
 wsl --shutdown
 ```
 
+---
+
 ## Usage
 
 Once booted with the custom kernel, grants are managed via securityfs:
@@ -90,25 +96,31 @@ echo "9500 /mnt/c/data" | sudo tee /sys/kernel/security/ugow/revoke
 cat /sys/kernel/security/ugow/grants
 ```
 
-The FUSE shim's `--grant` / `--revoke` CLI can be extended to write to these
-files instead of (or in addition to) its SQLite database, providing a unified
-interface for both enforcement layers.
+The `ugow` CLI auto-detects the kmod backend and syncs grants to securityfs
+automatically, so you can also use:
+
+```bash
+sudo ugow allow 9500 /mnt/c/data
+sudo ugow deny  9500 /mnt/c/data
+```
+
+---
 
 ## How it works
 
 The LSM hooks into the kernel's VFS layer at these points:
 
-| Hook                | Enforces                                  |
-|---------------------|-------------------------------------------|
-| `inode_permission`  | W-bit on any write-access permission check|
-| `file_open`         | W-bit when opening a file for writing     |
-| `inode_create`      | Parent W-bit for file creation            |
-| `inode_link`        | Parent W-bit for hard link creation       |
-| `inode_unlink`      | W-bit for file deletion                   |
-| `inode_symlink`     | Parent W-bit for symlink creation         |
-| `inode_mkdir`       | Parent W-bit for directory creation       |
-| `inode_rmdir`       | W-bit for directory removal               |
-| `inode_rename`      | Source W-bit + destination parent W-bit   |
+| Hook | Enforces |
+|------|----------|
+| `inode_permission` | W-bit on any write-access permission check |
+| `file_open` | W-bit when opening a file for writing |
+| `inode_create` | Parent W-bit for file creation |
+| `inode_link` | Parent W-bit for hard link creation |
+| `inode_unlink` | W-bit for file deletion |
+| `inode_symlink` | Parent W-bit for symlink creation |
+| `inode_mkdir` | Parent W-bit for directory creation |
+| `inode_rmdir` | W-bit for directory removal |
+| `inode_rename` | Source W-bit + destination parent W-bit |
 
 Enforcement only activates on superblocks with filesystem type `9p` (how WSL2
 mounts Windows drives). All other filesystems are unaffected.

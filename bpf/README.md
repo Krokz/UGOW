@@ -8,20 +8,20 @@ kernel** -- no kernel rebuild required.
 ```
                      ┌────────────────────────────────┐
                      │          WSL2 Kernel            │
-                     │                                │
-   open("/mnt/c/x") │  VFS → LSM hooks → BPF progs   │
-   ──────────────────┤       ↓                        │
-                     │  grants map: (ino,dev,uid)?    │
-                     │       ↓                        │
-                     │  ALLOW or -EACCES              │
+                     │                                 │
+   open("/mnt/c/x") │  VFS -> LSM hooks -> BPF progs  │
+   ──────────────────┤       |                         │
+                     │  grants map: (ino,dev,uid)?     │
+                     │       |                         │
+                     │  ALLOW or -EACCES               │
                      └────────────────────────────────┘
-                                 ▲
+                                 ^
                      ┌───────────┴───────────┐
-                     │  ugow_manage.py       │
-                     │  resolves paths →     │
-                     │  (ino, dev) via stat() │
-                     │  updates BPF maps     │
-                     │  persists in SQLite   │
+                     │   ugow_manage.py      │
+                     │   resolves paths ->   │
+                     │   (ino, dev) via stat  │
+                     │   updates BPF maps    │
+                     │   persists in SQLite  │
                      └───────────────────────┘
 ```
 
@@ -33,6 +33,10 @@ FUSE shim).
 
 Key advantage over the FUSE shim: **cannot be bypassed from userspace**.
 Every syscall path to the filesystem passes through the LSM hooks.
+
+**Root (uid 0) is always exempt** from enforcement to prevent system lockout.
+
+---
 
 ## Prerequisites
 
@@ -67,7 +71,22 @@ cat /sys/kernel/security/lsm
 sudo apt install -y clang llvm libbpf-dev linux-tools-common bpftool
 ```
 
-### 3. Build the BPF program
+### 3. Install via setup.sh
+
+```bash
+sudo ./setup.sh --mode bpf
+```
+
+This builds the BPF program, installs all components, creates a systemd
+service, and enables enforcement on `/mnt/c` by default.
+
+---
+
+## Manual usage
+
+If you prefer to manage the BPF program directly (without the installer):
+
+### Build
 
 ```bash
 cd bpf/
@@ -77,17 +96,13 @@ make
 This generates `vmlinux.h` from your running kernel's BTF data and compiles
 `ugow.bpf.o`.
 
-## Usage
-
-All commands require root (`sudo`).
-
-### Load the BPF program
+### Load
 
 ```bash
 sudo python3 ugow_manage.py load
 ```
 
-### Register a Windows drive mount for enforcement
+### Register a drive for enforcement
 
 ```bash
 sudo python3 ugow_manage.py add-device /mnt/c
@@ -98,59 +113,67 @@ filesystems (ext4, tmpfs, etc.) are completely unaffected.
 
 ### Grant / revoke write access
 
-```bash
-# Grant UID 9500 write access to /mnt/c/data
-sudo python3 ugow_manage.py grant 9500 /mnt/c/data
+The recommended way is through the unified CLI:
 
-# Revoke it
+```bash
+sudo ugow allow 9500 /mnt/c/data
+sudo ugow deny  9500 /mnt/c/data
+```
+
+The CLI automatically syncs grants to both SQLite and the BPF map when
+BPF is active. You can also use the manager directly:
+
+```bash
+sudo python3 ugow_manage.py grant 9500 /mnt/c/data
 sudo python3 ugow_manage.py revoke 9500 /mnt/c/data
 ```
 
-Grants are persisted in the same SQLite database as the FUSE shim
-(`/var/lib/wsl-fuse-shim/wperm.db`), so both enforcement layers share a
-single source of truth.
-
 ### Sync existing grants into BPF
 
-If you already have grants from the FUSE shim:
+If you already have grants in SQLite (e.g. from prior FUSE usage):
 
 ```bash
 sudo python3 ugow_manage.py sync
 ```
 
-### List active BPF map entries
+### List / unload
 
 ```bash
-sudo python3 ugow_manage.py list
+sudo python3 ugow_manage.py list      # show BPF map entries
+sudo python3 ugow_manage.py unload    # detach hooks and unpin programs
 ```
 
-### Unload
-
-```bash
-sudo python3 ugow_manage.py unload
-```
+---
 
 ## Architecture notes
 
-- **No string operations in kernel**: the BPF program uses `(inode, device,
+- **No string operations in kernel** -- the BPF program uses `(inode, device,
   uid)` integer keys, avoiding BPF's string limitations entirely. The
   userspace loader resolves paths via `stat()`.
 
-- **Inheritance**: the BPF program walks up the dentry tree (bounded to 32
+- **Inheritance** -- the BPF program walks up the dentry tree (bounded to 32
   levels) checking each ancestor, so a grant on `/mnt/c/data` covers
   `/mnt/c/data/sub/file.txt`.
 
-- **Device filtering**: only mounts registered via `add-device` trigger
+- **Device filtering** -- only mounts registered via `add-device` trigger
   enforcement. This prevents accidental lockouts on system filesystems.
 
-- **Shared database**: grants live in the same SQLite DB as the FUSE shim,
-  so you can use either or both enforcement layers with a single grant
-  management interface.
+- **Root exemption** -- uid 0 is always allowed through all hooks, preventing
+  root lockout if the BPF maps are empty or misconfigured.
+
+- **Cross-device rename protection** -- the rename hook checks both the source
+  and destination directories against `target_devs`, preventing files from
+  being renamed into a protected directory from an unprotected one.
+
+- **Shared database** -- grants live in the same SQLite DB as the FUSE shim
+  (`/var/lib/ugow/wperm.db`), so you can switch between enforcement layers
+  without re-creating grants.
+
+---
 
 ## Deployment tiers
 
 | Tier | Setup | Bypass resistance | Overhead |
 |------|-------|-------------------|----------|
-| FUSE shim only | `pip install fusepy`, run script | Mountpoint only | Userspace context switch |
-| BPF LSM only | `.wslconfig` + `apt install clang` | Full (kernel-level) | Near-zero (inline BPF) |
-| Both | All of the above | Full + defense-in-depth | Both |
+| FUSE shim only | `sudo ./setup.sh` | Mountpoint only | Userspace context switch |
+| BPF LSM only | `.wslconfig` + `sudo ./setup.sh --mode bpf` | Full (kernel-level) | Near-zero (inline BPF) |
