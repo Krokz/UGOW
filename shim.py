@@ -152,7 +152,7 @@ class UGOWShim(Operations):
         return 0
 
     def flush(self, path, fh):
-        return 0
+        return os.fsync(fh)
 
     def release(self, path, fh):
         return os.close(fh)
@@ -216,16 +216,13 @@ class UGOWShim(Operations):
 
     def chmod(self, path, mode):
         full = self._full_path(path)
-        uid = self._effective_uid()
-        prev = self.store.has_wbit(self._grant_path(full), uid)
-        if mode & 0o1000 and not prev:
-            self.store.grant(self._grant_path(full), uid)
-        elif not (mode & 0o1000) and prev:
-            self.store.revoke(self._grant_path(full), uid)
-        os.chmod(full, mode & 0o777)
+        os.chmod(full, mode & 0o7777)
         return 0
 
     def chown(self, path, uid, gid):
+        caller_uid = self._effective_uid()
+        if caller_uid != 0:
+            raise OSError(errno.EPERM, "Only root can chown")
         return os.lchown(self._full_path(path), uid, gid)
 
     def utimens(self, path, times=None):
@@ -234,42 +231,15 @@ class UGOWShim(Operations):
 
 
 # ---------------------------------------------------------------------------
-# CLI
+# Daemon entry point
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="UGOW: FUSE shim with W-bit permission control"
+        description="UGOW FUSE shim daemon"
     )
-    parser.add_argument("root", nargs="?", help="Backing root path")
-    parser.add_argument("mountpoint", nargs="?", help="FUSE mount point")
-    parser.add_argument(
-        "--grant", nargs=2, metavar=("UID", "PATH"),
-        help="Grant W-bit for UID on PATH",
-    )
-    parser.add_argument(
-        "--revoke", nargs=2, metavar=("UID", "PATH"),
-        help="Revoke W-bit for UID on PATH",
-    )
-    parser.add_argument(
-        "--list", action="store_true", help="List all W-bit grants"
-    )
-    parser.add_argument(
-        "--list-for-uid", type=int, metavar="UID",
-        help="List W-bit grants for a specific UID",
-    )
-    parser.add_argument(
-        "--cleanup-acl", action="store_true",
-        help="Remove stale wsl_* Windows users with no grants",
-    )
-    parser.add_argument(
-        "--check", metavar="PATH",
-        help="Check if current user has W-bit on PATH (exit 0=granted, 1=denied)",
-    )
-    parser.add_argument(
-        "--mirror-acl", action="store_true",
-        help="Enable NTFS ACL mirroring via PowerShell",
-    )
+    parser.add_argument("root", help="Backing root path")
+    parser.add_argument("mountpoint", help="FUSE mount point")
     parser.add_argument(
         "--db", default=DEFAULT_DB_PATH,
         help="Path to SQLite DB (default: %(default)s)",
@@ -277,6 +247,10 @@ if __name__ == "__main__":
     parser.add_argument(
         "--launcher-uid", type=int, default=None,
         help="UID to remap root operations to (detects SUDO_UID if omitted)",
+    )
+    parser.add_argument(
+        "--mirror-acl", action="store_true",
+        help="Enable NTFS ACL mirroring via PowerShell",
     )
     args = parser.parse_args()
 
@@ -295,43 +269,6 @@ if __name__ == "__main__":
             LAUNCHER_UID = uid
 
     store = PermStore(db_path=args.db, mirror_acl=args.mirror_acl)
-
-    if args.grant:
-        uid, p = int(args.grant[0]), os.path.abspath(args.grant[1])
-        store.grant(p, uid)
-        print(f"Granted W-bit: uid={uid} path={p}")
-        sys.exit(0)
-
-    if args.revoke:
-        uid, p = int(args.revoke[0]), os.path.abspath(args.revoke[1])
-        store.revoke(p, uid)
-        print(f"Revoked W-bit: uid={uid} path={p}")
-        sys.exit(0)
-
-    if args.list or args.list_for_uid is not None:
-        grants = store.list_grants(uid=args.list_for_uid)
-        if not grants:
-            print("No grants found.")
-        else:
-            for gpath, guid in grants:
-                print(f"  uid={guid}\t{gpath}")
-        sys.exit(0)
-
-    if args.check:
-        path = os.path.abspath(args.check)
-        uid = os.getuid()
-        has = store.has_wbit(path, uid)
-        status = "GRANTED" if has else "DENIED"
-        print(f"W-bit {status} for uid={uid} on {path}")
-        sys.exit(0 if has else 1)
-
-    if args.cleanup_acl:
-        store.cleanup_acl()
-        sys.exit(0)
-
-    if not args.root or not args.mountpoint:
-        parser.print_help()
-        sys.exit(1)
 
     FUSE(
         UGOWShim(args.root, args.mountpoint, store), args.mountpoint,
