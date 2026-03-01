@@ -57,8 +57,35 @@ VE=/opt/ugow
 # Uninstall
 # ═══════════════════════════════════════════════════════════════════════════
 
+_spin() {
+  local msg="$1"
+  local chars='/-\|'
+  local i=0
+  tput civis 2>/dev/null
+  while true; do
+    printf "\r  [%c] %s" "${chars:i:1}" "$msg"
+    i=$(( (i + 1) % 4 ))
+    sleep 0.12
+  done
+}
+
+_spin_stop() {
+  kill "$1" 2>/dev/null
+  wait "$1" 2>/dev/null
+  tput cnorm 2>/dev/null
+  printf "\r  [*] %s\n" "$2"
+}
+
 if [[ "$UNINSTALL" == true ]]; then
-  echo "--- Uninstalling UGOW ---"
+  cat <<'BANNER'
+  _   _    ____    ___   __        __
+ | | | |  / ___|  / _ \  \ \      / /
+ | | | | | |  _  | | | |  \ \ /\ / /
+ | |_| | | |_| | | |_| |   \ V  V /
+  \___/   \____|  \___/     \_/\_/
+         Uninstalling ...
+BANNER
+  echo ""
 
   # Stop and disable FUSE shim units, collecting drive letters
   managed_drives=()
@@ -66,8 +93,10 @@ if [[ "$UNINSTALL" == true ]]; then
                 --plain --no-legend --all 2>/dev/null | awk '{print $1}'); do
     letter=$(echo "$unit" | sed 's/wsl-fuse-shim@\(.\)\.service/\1/')
     managed_drives+=("$letter")
+    _spin "Stopping $unit" &
+    spin_pid=$!
     sudo systemctl disable --now "$unit" 2>/dev/null || true
-    echo "  Stopped: $unit"
+    _spin_stop "$spin_pid" "Stopped $unit"
   done
   sudo rm -f /etc/systemd/system/wsl-fuse-shim@.service
 
@@ -175,6 +204,16 @@ done
 # ═══════════════════════════════════════════════════════════════════════════
 # Base install (always): CLI + permstore + venv
 # ═══════════════════════════════════════════════════════════════════════════
+
+cat <<BANNER
+  _   _    ____    ___   __        __
+ | | | |  / ___|  / _ \  \ \      / /
+ | | | | | |  _  | | | |  \ \ /\ / /
+ | |_| | | |_| | | |_| |   \ V  V /
+  \___/   \____|  \___/     \_/\_/
+         Installing ($MODE) ...
+BANNER
+echo ""
 
 echo "--- Installing base (CLI + permission store) ---"
 
