@@ -117,7 +117,27 @@ class PermStore:
             conn = sqlite3.connect(self._db_path)
             conn.execute("PRAGMA journal_mode=WAL")
             self._local.conn = conn
+            with self._wbit_cache_lock:
+                if not hasattr(self, "_thread_conns"):
+                    self._thread_conns = []
+                self._thread_conns.append(conn)
         return self._local.conn
+
+    def close(self):
+        """Close all per-thread SQLite connections."""
+        conns = getattr(self, "_thread_conns", [])
+        for conn in conns:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        conns.clear()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
 
     def has_wbit(self, path, uid):
         cache_key = (path, uid)
@@ -223,6 +243,7 @@ class PermStore:
                     [_find_powershell(), "-Command", ps],
                     capture_output=True,
                     text=True,
+                    timeout=30,
                 )
                 if result.returncode != 0:
                     err = (result.stderr or result.stdout or "").strip()
@@ -230,6 +251,11 @@ class PermStore:
                         "ACL mirror %s failed for %s (uid %d): %s",
                         action, path, uid, err,
                     )
+            except subprocess.TimeoutExpired:
+                log.warning(
+                    "ACL mirror %s timed out for %s (uid %d)",
+                    action, path, uid,
+                )
             except Exception:
                 log.exception("ACL worker error")
             finally:
