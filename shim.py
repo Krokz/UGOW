@@ -4,9 +4,15 @@ import sys
 import errno
 import argparse
 import logging
-from fuse import FUSE, Operations, fuse_get_context
 
-from permstore import PermStore, DEFAULT_DB_PATH  # noqa: F401
+_HERE = os.path.dirname(os.path.abspath(__file__))
+for _p in [_HERE, "/opt/ugow/lib"]:
+    if os.path.isfile(os.path.join(_p, "permstore.py")):
+        sys.path.insert(0, _p)
+        break
+
+from fuse import FUSE, Operations, fuse_get_context  # noqa: E402
+from permstore import PermStore, DEFAULT_DB_PATH  # noqa: E402
 
 LAUNCHER_UID = None
 
@@ -19,7 +25,7 @@ log = logging.getLogger("ugow")
 
 class UGOWShim(Operations):
     def __init__(self, root, store):
-        self.root = os.path.realpath(root)
+        self.root = os.path.abspath(root)
         self.store = store
 
     def _effective_uid(self):
@@ -29,7 +35,7 @@ class UGOWShim(Operations):
         return real_uid
 
     def _full_path(self, path):
-        full = os.path.realpath(os.path.join(self.root, path.lstrip("/")))
+        full = os.path.abspath(os.path.join(self.root, path.lstrip("/")))
         if not (full == self.root or full.startswith(self.root + os.sep)):
             raise OSError(errno.EACCES, "Path escapes backing root")
         return full
