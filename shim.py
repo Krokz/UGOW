@@ -24,9 +24,17 @@ log = logging.getLogger("ugow")
 # ---------------------------------------------------------------------------
 
 class UGOWShim(Operations):
-    def __init__(self, root, store):
+    def __init__(self, root, mountpoint, store):
         self.root = os.path.abspath(root)
+        self.mountpoint = os.path.abspath(mountpoint)
         self.store = store
+
+    def _grant_path(self, backing_path):
+        """Convert backing store path to user-visible mount path for grant lookups."""
+        rel = os.path.relpath(backing_path, self.root)
+        if rel == '.':
+            return self.mountpoint
+        return os.path.join(self.mountpoint, rel)
 
     def _effective_uid(self):
         real_uid, _, _ = fuse_get_context()
@@ -54,7 +62,7 @@ class UGOWShim(Operations):
             )
         }
         uid = self._effective_uid()
-        if not self.store.has_wbit(full, uid):
+        if not self.store.has_wbit(self._grant_path(full), uid):
             d["st_mode"] &= ~0o222
         return d
 
@@ -62,7 +70,7 @@ class UGOWShim(Operations):
         if name == "user.ugow.wbit":
             full = self._full_path(path)
             uid = self._effective_uid()
-            return b"1" if self.store.has_wbit(full, uid) else b"0"
+            return b"1" if self.store.has_wbit(self._grant_path(full), uid) else b"0"
         full = self._full_path(path)
         try:
             return os.getxattr(full, name)
@@ -82,7 +90,7 @@ class UGOWShim(Operations):
         full = self._full_path(path)
         if amode & os.W_OK:
             uid = self._effective_uid()
-            if not self.store.has_wbit(full, uid):
+            if not self.store.has_wbit(self._grant_path(full), uid):
                 raise OSError(errno.EACCES, "No W permission")
         if not os.access(full, amode):
             raise OSError(errno.EACCES, "")
@@ -110,14 +118,14 @@ class UGOWShim(Operations):
     def open(self, path, flags):
         full = self._full_path(path)
         uid = self._effective_uid()
-        if flags & (os.O_WRONLY | os.O_RDWR) and not self.store.has_wbit(full, uid):
+        if flags & (os.O_WRONLY | os.O_RDWR) and not self.store.has_wbit(self._grant_path(full), uid):
             raise OSError(errno.EACCES, "No W permission")
         return os.open(full, flags)
 
     def create(self, path, mode, fi=None):
         full = self._full_path(path)
         uid = self._effective_uid()
-        if not self.store.has_wbit(os.path.dirname(full), uid):
+        if not self.store.has_wbit(self._grant_path(os.path.dirname(full)), uid):
             raise OSError(errno.EACCES, "No W on parent")
         return os.open(full, os.O_WRONLY | os.O_CREAT, mode)
 
@@ -132,7 +140,7 @@ class UGOWShim(Operations):
     def truncate(self, path, length, fh=None):
         full = self._full_path(path)
         uid = self._effective_uid()
-        if not self.store.has_wbit(full, uid):
+        if not self.store.has_wbit(self._grant_path(full), uid):
             raise OSError(errno.EACCES, "No W permission")
         if fh is not None:
             os.ftruncate(fh, length)
@@ -157,14 +165,14 @@ class UGOWShim(Operations):
     def mkdir(self, path, mode):
         full = self._full_path(path)
         uid = self._effective_uid()
-        if not self.store.has_wbit(os.path.dirname(full), uid):
+        if not self.store.has_wbit(self._grant_path(os.path.dirname(full)), uid):
             raise OSError(errno.EACCES, "No W on parent")
         return os.mkdir(full, mode)
 
     def rmdir(self, path):
         full = self._full_path(path)
         uid = self._effective_uid()
-        if not self.store.has_wbit(os.path.dirname(full), uid):
+        if not self.store.has_wbit(self._grant_path(os.path.dirname(full)), uid):
             raise OSError(errno.EACCES, "No W on parent")
         return os.rmdir(full)
 
@@ -173,15 +181,15 @@ class UGOWShim(Operations):
     def unlink(self, path):
         full = self._full_path(path)
         uid = self._effective_uid()
-        if not self.store.has_wbit(os.path.dirname(full), uid):
+        if not self.store.has_wbit(self._grant_path(os.path.dirname(full)), uid):
             raise OSError(errno.EACCES, "No W on parent")
         return os.unlink(full)
 
     def rename(self, old, new):
         old_p, new_p = self._full_path(old), self._full_path(new)
         uid = self._effective_uid()
-        if not self.store.has_wbit(os.path.dirname(old_p), uid) or \
-           not self.store.has_wbit(os.path.dirname(new_p), uid):
+        if not self.store.has_wbit(self._grant_path(os.path.dirname(old_p)), uid) or \
+           not self.store.has_wbit(self._grant_path(os.path.dirname(new_p)), uid):
             raise OSError(errno.EACCES, "No W on parent")
         return os.rename(old_p, new_p)
 
@@ -189,7 +197,7 @@ class UGOWShim(Operations):
         """Create a symlink at *target* pointing to *source*."""
         new_link = self._full_path(target)
         uid = self._effective_uid()
-        if not self.store.has_wbit(os.path.dirname(new_link), uid):
+        if not self.store.has_wbit(self._grant_path(os.path.dirname(new_link)), uid):
             raise OSError(errno.EACCES, "No W on parent")
         return os.symlink(source, new_link)
 
@@ -198,7 +206,7 @@ class UGOWShim(Operations):
         new_link = self._full_path(target)
         existing = self._full_path(source)
         uid = self._effective_uid()
-        if not self.store.has_wbit(os.path.dirname(new_link), uid):
+        if not self.store.has_wbit(self._grant_path(os.path.dirname(new_link)), uid):
             raise OSError(errno.EACCES, "No W on parent")
         return os.link(existing, new_link)
 
@@ -207,11 +215,11 @@ class UGOWShim(Operations):
     def chmod(self, path, mode):
         full = self._full_path(path)
         uid = self._effective_uid()
-        prev = self.store.has_wbit(full, uid)
+        prev = self.store.has_wbit(self._grant_path(full), uid)
         if mode & 0o1000 and not prev:
-            self.store.grant(full, uid)
+            self.store.grant(self._grant_path(full), uid)
         elif not (mode & 0o1000) and prev:
-            self.store.revoke(full, uid)
+            self.store.revoke(self._grant_path(full), uid)
         os.chmod(full, mode & 0o777)
         return 0
 
@@ -324,6 +332,6 @@ if __name__ == "__main__":
         sys.exit(1)
 
     FUSE(
-        UGOWShim(args.root, store), args.mountpoint,
+        UGOWShim(args.root, args.mountpoint, store), args.mountpoint,
         foreground=True, allow_other=True, default_permissions=True,
     )
