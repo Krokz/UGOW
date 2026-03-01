@@ -62,7 +62,9 @@ class UGOWShim(Operations):
             )
         }
         uid = self._effective_uid()
-        if not self.store.has_wbit(self._grant_path(full), uid):
+        if self.store.has_wbit(self._grant_path(full), uid):
+            d["st_mode"] |= 0o222
+        else:
             d["st_mode"] &= ~0o222
         return d
 
