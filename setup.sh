@@ -456,6 +456,5 @@ Installed mode: $MODE
 To rollback:
 
   sudo ./install.sh --uninstall
-  wsl --shutdown
 
 MSG
