@@ -136,7 +136,7 @@ sudo python3 ugow_manage.py unload
   uid)` integer keys, avoiding BPF's string limitations entirely. The
   userspace loader resolves paths via `stat()`.
 
-- **Inheritance**: the BPF program walks up the dentry tree (bounded to 64
+- **Inheritance**: the BPF program walks up the dentry tree (bounded to 32
   levels) checking each ancestor, so a grant on `/mnt/c/data` covers
   `/mnt/c/data/sub/file.txt`.
 

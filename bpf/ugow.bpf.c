@@ -120,6 +120,8 @@ int BPF_PROG(ugow_file_open, struct file *file)
 		return 0;
 
 	__u32 uid = bpf_get_current_uid_gid() & 0xFFFFFFFF;
+	if (uid == 0)
+		return 0;
 	struct dentry *dentry = BPF_CORE_READ(file, f_path.dentry);
 	return check_wbit_dentry(dentry, uid);
 }
@@ -133,6 +135,8 @@ int BPF_PROG(ugow_inode_permission, struct inode *inode, int mask)
 		return 0;
 
 	__u32 uid = bpf_get_current_uid_gid() & 0xFFFFFFFF;
+	if (uid == 0)
+		return 0;
 	struct hlist_node *first = BPF_CORE_READ(inode, i_dentry.first);
 	if (!first)
 		return -EACCES;
@@ -147,6 +151,8 @@ int BPF_PROG(ugow_inode_create, struct inode *dir, struct dentry *dentry,
 	if (!is_target_dev(dir))
 		return 0;
 	__u32 uid = bpf_get_current_uid_gid() & 0xFFFFFFFF;
+	if (uid == 0)
+		return 0;
 	return check_parent_wbit(dentry, uid);
 }
 
@@ -157,6 +163,8 @@ int BPF_PROG(ugow_inode_link, struct dentry *old_dentry, struct inode *dir,
 	if (!is_target_dev(dir))
 		return 0;
 	__u32 uid = bpf_get_current_uid_gid() & 0xFFFFFFFF;
+	if (uid == 0)
+		return 0;
 	return check_parent_wbit(new_dentry, uid);
 }
 
@@ -166,6 +174,8 @@ int BPF_PROG(ugow_inode_unlink, struct inode *dir, struct dentry *dentry)
 	if (!is_target_dev(dir))
 		return 0;
 	__u32 uid = bpf_get_current_uid_gid() & 0xFFFFFFFF;
+	if (uid == 0)
+		return 0;
 	return check_parent_wbit(dentry, uid);
 }
 
@@ -176,6 +186,8 @@ int BPF_PROG(ugow_inode_symlink, struct inode *dir, struct dentry *dentry,
 	if (!is_target_dev(dir))
 		return 0;
 	__u32 uid = bpf_get_current_uid_gid() & 0xFFFFFFFF;
+	if (uid == 0)
+		return 0;
 	return check_parent_wbit(dentry, uid);
 }
 
@@ -186,6 +198,8 @@ int BPF_PROG(ugow_inode_mkdir, struct inode *dir, struct dentry *dentry,
 	if (!is_target_dev(dir))
 		return 0;
 	__u32 uid = bpf_get_current_uid_gid() & 0xFFFFFFFF;
+	if (uid == 0)
+		return 0;
 	return check_parent_wbit(dentry, uid);
 }
 
@@ -195,6 +209,8 @@ int BPF_PROG(ugow_inode_rmdir, struct inode *dir, struct dentry *dentry)
 	if (!is_target_dev(dir))
 		return 0;
 	__u32 uid = bpf_get_current_uid_gid() & 0xFFFFFFFF;
+	if (uid == 0)
+		return 0;
 	return check_parent_wbit(dentry, uid);
 }
 
@@ -203,13 +219,21 @@ int BPF_PROG(ugow_inode_rename, struct inode *old_dir,
 	     struct dentry *old_dentry, struct inode *new_dir,
 	     struct dentry *new_dentry)
 {
-	if (!is_target_dev(old_dir))
+	bool old_target = is_target_dev(old_dir);
+	bool new_target = is_target_dev(new_dir);
+	if (!old_target && !new_target)
 		return 0;
 
 	__u32 uid = bpf_get_current_uid_gid() & 0xFFFFFFFF;
+	if (uid == 0)
+		return 0;
 
-	int ret = check_parent_wbit(old_dentry, uid);
-	if (ret)
-		return ret;
-	return check_parent_wbit(new_dentry, uid);
+	if (old_target) {
+		int ret = check_parent_wbit(old_dentry, uid);
+		if (ret)
+			return ret;
+	}
+	if (new_target)
+		return check_parent_wbit(new_dentry, uid);
+	return 0;
 }
