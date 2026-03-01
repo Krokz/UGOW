@@ -31,7 +31,7 @@ def backing_root(tmp_path):
 @pytest.fixture()
 def shim(backing_root, store):
     """A UGOWShim wired to the temporary root and store."""
-    return UGOWShim(backing_root, store)
+    return UGOWShim(backing_root, backing_root, store)
 
 
 @pytest.fixture()

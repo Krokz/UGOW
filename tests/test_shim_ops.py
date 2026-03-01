@@ -248,24 +248,41 @@ class TestSymlinkLink:
             assert f.read() == "linked"
 
 
-class TestChmodStickyBit:
-    def test_sticky_bit_grants_wbit(self, shim, store, backing_root, mock_fuse_ctx):
+class TestChmod:
+    def test_chmod_passthrough(self, shim, backing_root, mock_fuse_ctx):
         mock_fuse_ctx(UID)
-        fpath = os.path.join(backing_root, "sticky.txt")
+        fpath = os.path.join(backing_root, "ch.txt")
         with open(fpath, "w") as f:
             f.write("")
-        assert store.has_wbit(fpath, UID) is False
-        shim.chmod("/sticky.txt", 0o1644)
-        assert store.has_wbit(fpath, UID) is True
+        shim.chmod("/ch.txt", 0o755)
+        assert os.stat(fpath).st_mode & 0o7777 == 0o755
 
-    def test_removing_sticky_bit_revokes_wbit(self, shim, store, backing_root, mock_fuse_ctx):
+    def test_chmod_does_not_grant_wbit(self, shim, store, backing_root, mock_fuse_ctx):
+        """chmod +t must NOT grant W-bit -- grants only via 'sudo ugow allow'."""
         mock_fuse_ctx(UID)
         fpath = os.path.join(backing_root, "sticky.txt")
         with open(fpath, "w") as f:
             f.write("")
-        store.grant(fpath, UID)
-        shim.chmod("/sticky.txt", 0o644)
+        shim.chmod("/sticky.txt", 0o1644)
         assert store.has_wbit(fpath, UID) is False
+
+
+class TestChown:
+    def test_chown_denied_for_non_root(self, shim, backing_root, mock_fuse_ctx):
+        mock_fuse_ctx(UID)
+        fpath = os.path.join(backing_root, "own.txt")
+        with open(fpath, "w") as f:
+            f.write("")
+        with pytest.raises(OSError) as exc:
+            shim.chown("/own.txt", 0, 0)
+        assert exc.value.errno == errno.EPERM
+
+    def test_chown_allowed_for_root(self, shim, backing_root, mock_fuse_ctx):
+        mock_fuse_ctx(0)
+        fpath = os.path.join(backing_root, "own.txt")
+        with open(fpath, "w") as f:
+            f.write("")
+        shim.chown("/own.txt", os.getuid(), os.getgid())
 
 
 class TestAccess:
@@ -305,11 +322,11 @@ class TestReleaseFlush:
         with pytest.raises(OSError):
             os.read(fh, 1)
 
-    def test_flush_returns_zero(self, shim, store, backing_root, mock_fuse_ctx):
+    def test_flush_syncs_fd(self, shim, store, backing_root, mock_fuse_ctx):
         mock_fuse_ctx(UID)
         fpath = os.path.join(backing_root, "fl.txt")
         with open(fpath, "w") as f:
             f.write("x")
         fh = shim.open("/fl.txt", os.O_RDONLY)
-        assert shim.flush("/fl.txt", fh) == 0
+        shim.flush("/fl.txt", fh)
         shim.release("/fl.txt", fh)

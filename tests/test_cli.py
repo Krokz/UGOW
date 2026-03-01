@@ -170,12 +170,55 @@ class TestCommandIntegration:
     def test_list_empty(self, monkeypatch, fake_args, capsys):
         from cli import cmd_list
 
+        monkeypatch.setattr("os.getuid", lambda: 0)
         monkeypatch.setattr("cli._bpf_active", lambda: False)
         monkeypatch.setattr("cli._kmod_active", lambda: False)
 
         cmd_list(fake_args())
         captured = capsys.readouterr()
         assert "No grants" in captured.out
+
+    def test_check_uses_sudo_uid(self, monkeypatch, fake_args, tmp_path, capsys):
+        """cmd_check should use SUDO_UID when running as root via sudo."""
+        from cli import cmd_allow, cmd_check
+
+        monkeypatch.setattr("os.getuid", lambda: 0)
+        monkeypatch.setenv("SUDO_UID", "1000")
+        monkeypatch.setattr("cli._bpf_active", lambda: False)
+        monkeypatch.setattr("cli._kmod_active", lambda: False)
+
+        target = str(tmp_path / "chkdata")
+        os.makedirs(target, exist_ok=True)
+
+        cmd_allow(fake_args(user="1000", path=target))
+
+        with pytest.raises(SystemExit) as exc:
+            cmd_check(fake_args(path=target))
+        assert exc.value.code == 0
+        captured = capsys.readouterr()
+        assert "uid=1000" in captured.out
+        assert "CAN write" in captured.out
+
+    def test_check_user_flag(self, monkeypatch, fake_args, tmp_path, capsys):
+        """cmd_check --user should check the specified user."""
+        from cli import cmd_allow, cmd_check
+
+        monkeypatch.setattr("os.getuid", lambda: 0)
+        monkeypatch.setattr("cli._bpf_active", lambda: False)
+        monkeypatch.setattr("cli._kmod_active", lambda: False)
+
+        target = str(tmp_path / "chkuser")
+        os.makedirs(target, exist_ok=True)
+
+        cmd_allow(fake_args(user="0", path=target))
+
+        with pytest.raises(SystemExit) as exc:
+            cmd_check(fake_args(path=target, user="0"))
+        assert exc.value.code == 0
+
+        with pytest.raises(SystemExit) as exc:
+            cmd_check(fake_args(path=target, user="99999"))
+        assert exc.value.code == 1
 
     def test_status_shows_covering_grant(self, monkeypatch, fake_args, tmp_path, capsys):
         from cli import cmd_allow, cmd_status
