@@ -70,10 +70,10 @@ _spin() {
 }
 
 _spin_stop() {
-  kill "$1" 2>/dev/null
-  wait "$1" 2>/dev/null
-  tput cnorm 2>/dev/null
-  printf "\r  [*] %s\n" "$2"
+  kill "$1" 2>/dev/null || true
+  wait "$1" 2>/dev/null || true
+  tput cnorm 2>/dev/null || true
+  printf "\r\033[K  [*] %s\n" "$2"
 }
 
 if [[ "$UNINSTALL" == true ]]; then
