@@ -197,6 +197,7 @@ def cmd_deny(args):
 
 
 def cmd_check(args):
+    require_root("check")
     path = os.path.abspath(args.path)
     uid = os.getuid()
     username = uid_to_name(uid)
@@ -212,6 +213,7 @@ def cmd_check(args):
 
 
 def cmd_status(args):
+    require_root("status")
     path = os.path.abspath(args.path)
     ancestors = set(_path_ancestors(path))
 
@@ -237,6 +239,7 @@ def cmd_status(args):
 
 
 def cmd_list(args):
+    require_root("list")
     store = PermStore(db_path=args.db, mirror_acl=False)
     grants = store.list_grants()
 
@@ -280,11 +283,12 @@ def _validate_drive(letter):
 
 
 def cmd_mount(args):
+    require_root("mount")
     _require_fuse_mode()
     letter = _validate_drive(args.drive)
     service = UNIT_TEMPLATE.format(letter)
     result = subprocess.run(
-        ["sudo", "systemctl", "enable", "--now", service],
+        ["systemctl", "enable", "--now", service],
     )
     if result.returncode == 0:
         print(f"\nDrive {letter.upper()}: is now managed by UGOW at /mnt/{letter}")
@@ -293,16 +297,17 @@ def cmd_mount(args):
 
 
 def cmd_unmount(args):
+    require_root("unmount")
     _require_fuse_mode()
     letter = _validate_drive(args.drive)
     service = UNIT_TEMPLATE.format(letter)
 
     result = subprocess.run(
-        ["sudo", "systemctl", "disable", "--now", service],
+        ["systemctl", "disable", "--now", service],
     )
     if result.returncode == 0:
         subprocess.run(
-            ["sudo", "umount", f"/mnt/.{letter}-backing"],
+            ["umount", f"/mnt/.{letter}-backing"],
             capture_output=True,
         )
         print(f"\nDrive {letter.upper()}: is no longer managed by UGOW")
@@ -311,6 +316,7 @@ def cmd_unmount(args):
 
 
 def cmd_drives(args):
+    require_root("drives")
     _require_fuse_mode()
     result = subprocess.run(
         ["systemctl", "list-units", "wsl-fuse-shim@*.service",
