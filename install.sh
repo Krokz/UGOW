@@ -177,6 +177,17 @@ if [[ "$MODE" == "fuse" ]]; then
   UNIT_TEMPLATE=/etc/systemd/system/wsl-fuse-shim@.service
   REAL_UID="${SUDO_UID:-$(id -u)}"
 
+  # Ensure system FUSE packages are installed (fusepy needs libfuse2)
+  if ! command -v fusermount &>/dev/null; then
+    echo "  Installing system FUSE packages..."
+    if command -v apt-get &>/dev/null; then
+      sudo apt-get update -qq && sudo apt-get install -y fuse libfuse2
+    else
+      echo "Error: 'fusermount' not found. Install the 'fuse' package for your distro." >&2
+      exit 1
+    fi
+  fi
+
   # Install fusepy into the venv
   "$VE/venv/bin/pip" install --upgrade --quiet fusepy
 
@@ -218,7 +229,7 @@ ExecStartPre=-/bin/umount -l /mnt/%i
 ExecStartPre=-/usr/bin/fusermount -uz /mnt/%i
 ExecStartPre=/bin/mkdir -p /mnt/.%i-backing /mnt/%i
 ExecStartPre=/bin/sh -c 'mountpoint -q /mnt/.%i-backing && exit 0; n=0; while [ \$n -lt 5 ]; do mount -t drvfs "\$(echo %i | tr a-z A-Z):" /mnt/.%i-backing -o metadata && exit 0; n=\$((n+1)); sleep 2; done; echo "drvfs mount failed after 5 attempts" >&2; exit 1'
-ExecStartPre=/bin/chmod 0700 /mnt/.%i-backing
+ExecStartPre=-/bin/chmod 0700 /mnt/.%i-backing
 Environment=PYTHONPATH=${UGOW_LIB}
 ExecStart=${VE}/venv/bin/python ${SHIM_BIN} --launcher-uid ${REAL_UID} /mnt/.%i-backing /mnt/%i
 ExecStopPost=-/bin/sh -c 'fusermount -uz /mnt/%i 2>/dev/null; umount /mnt/.%i-backing 2>/dev/null; true'
@@ -233,7 +244,12 @@ EOF
   sudo systemctl daemon-reload
   sudo systemctl enable --now wsl-fuse-shim@c.service
 
-  cat <<'MSG'
+  # Verify the service actually started
+  echo ""
+  echo "  Waiting for FUSE shim to start..."
+  sleep 3
+  if systemctl is-active --quiet wsl-fuse-shim@c.service; then
+    cat <<'MSG'
 
   FUSE mode installed successfully.
 
@@ -246,6 +262,21 @@ EOF
     ugow mount e
 
 MSG
+  else
+    cat >&2 <<'MSG'
+
+  WARNING: wsl-fuse-shim@c.service failed to start.
+
+  Debug with:
+    sudo systemctl status wsl-fuse-shim@c.service
+    sudo journalctl -u wsl-fuse-shim@c.service -n 30
+
+  Common fixes:
+    - Ensure /dev/fuse exists:  sudo modprobe fuse
+    - Restart WSL and retry:    wsl --shutdown  (from Windows)
+
+MSG
+  fi
 fi
 
 # ═══════════════════════════════════════════════════════════════════════════
