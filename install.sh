@@ -60,9 +60,12 @@ VE=/opt/ugow
 if [[ "$UNINSTALL" == true ]]; then
   echo "--- Uninstalling UGOW ---"
 
-  # Stop and disable FUSE shim units
+  # Stop and disable FUSE shim units, collecting drive letters
+  managed_drives=()
   for unit in $(systemctl list-units 'wsl-fuse-shim@*.service' \
                 --plain --no-legend --all 2>/dev/null | awk '{print $1}'); do
+    letter=$(echo "$unit" | sed 's/wsl-fuse-shim@\(.\)\.service/\1/')
+    managed_drives+=("$letter")
     sudo systemctl disable --now "$unit" 2>/dev/null || true
     echo "  Stopped: $unit"
   done
@@ -90,13 +93,40 @@ if [[ "$UNINSTALL" == true ]]; then
   # Remove BPF pins
   sudo rm -rf /sys/fs/bpf/ugow
 
+  # Re-enable WSL automount so drives mount normally on next restart
+  if grep -q 'enabled = false' "$WSL_CONF" 2>/dev/null; then
+    sudo sed -i 's/enabled = false/enabled = true/' "$WSL_CONF"
+    echo "  WSL automount re-enabled in $WSL_CONF"
+  fi
+
+  # Offer to re-mount drives that were managed by UGOW
+  if [[ ${#managed_drives[@]} -gt 0 ]]; then
+    echo ""
+    echo "  The following drives were managed by UGOW: ${managed_drives[*]}"
+    while true; do
+      read -rp "  Re-mount them as standard DrvFs now? [Y/n] " answer
+      case "${answer,,}" in
+        y|"") break ;;
+        n)    break ;;
+        *)    echo "  Please answer Y or n." ;;
+      esac
+    done
+    if [[ -z "$answer" || "${answer,,}" == "y" ]]; then
+      for letter in "${managed_drives[@]}"; do
+        sudo mkdir -p "/mnt/$letter"
+        sudo mount -t drvfs "$(echo "$letter" | tr a-z A-Z):" "/mnt/$letter" -o metadata \
+          && echo "  Mounted: /mnt/$letter" \
+          || echo "  Failed to mount: /mnt/$letter"
+      done
+    fi
+  fi
+
   echo ""
   echo "  UGOW has been fully uninstalled."
   echo ""
   echo "  Note: /var/lib/ugow/wperm.db (permission database) was preserved."
   echo "  To remove it:  sudo rm -rf /var/lib/ugow"
   echo ""
-  echo "  Run 'wsl --shutdown' from Windows to apply wsl.conf changes."
   exit 0
 fi
 
