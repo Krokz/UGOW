@@ -162,6 +162,17 @@ def cmd_add_device(args):
     log.info("Added target device %d:%d (%s)", major, minor, path)
 
 
+def cmd_remove_device(args):
+    """Remove a mount's device from enforcement."""
+    path = os.path.abspath(args.mount_path)
+    _, dev = stat_path(path)
+    dev_key = struct.pack("=I", dev)
+    key_hex = " ".join(f"0x{b:02x}" for b in dev_key)
+    map_delete(f"{PIN_PATH}/target_devs", key_hex)
+    major, minor = dev_major_minor(dev)
+    log.info("Removed target device %d:%d (%s)", major, minor, path)
+
+
 def cmd_grant(args):
     """Grant W-bit for a UID on a path."""
     path = os.path.abspath(args.path)
@@ -265,6 +276,9 @@ def main():
     p = sub.add_parser("add-device", help="Register a mount for enforcement")
     p.add_argument("mount_path", help="Mount path (e.g. /mnt/c)")
 
+    p = sub.add_parser("remove-device", help="Remove a mount from enforcement")
+    p.add_argument("mount_path", help="Mount path (e.g. /mnt/d)")
+
     p = sub.add_parser("grant", help="Grant W-bit")
     p.add_argument("uid", type=int)
     p.add_argument("path")
@@ -292,6 +306,7 @@ def main():
         "load": cmd_load,
         "unload": cmd_unload,
         "add-device": cmd_add_device,
+        "remove-device": cmd_remove_device,
         "grant": cmd_grant,
         "revoke": cmd_revoke,
         "sync": cmd_sync,

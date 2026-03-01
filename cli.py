@@ -263,21 +263,26 @@ def cmd_list(args):
 
 
 # ---------------------------------------------------------------------------
-# Drive management (systemd template units)
+# Drive management (adapts to FUSE or BPF backend)
 # ---------------------------------------------------------------------------
 
 UNIT_TEMPLATE = "wsl-fuse-shim@{}.service"
 FUSE_TEMPLATE_PATH = "/etc/systemd/system/wsl-fuse-shim@.service"
+UGOW_MANAGE = "/opt/ugow/lib/ugow_manage.py"
+UGOW_PYTHON = "/opt/ugow/venv/bin/python"
 
 
-def _require_fuse_mode():
-    if not os.path.exists(FUSE_TEMPLATE_PATH):
-        print(
-            "Error: FUSE mode is not installed.\n"
-            "  Run './install.sh --mode fuse' first, or use BPF mode instead.",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+def _fuse_installed():
+    return os.path.exists(FUSE_TEMPLATE_PATH)
+
+
+def _detect_mode():
+    """Return 'fuse', 'bpf', or None."""
+    if _fuse_installed():
+        return "fuse"
+    if _bpf_active():
+        return "bpf"
+    return None
 
 
 def _validate_drive(letter):
@@ -288,69 +293,143 @@ def _validate_drive(letter):
     return letter
 
 
+def _require_mode(action):
+    mode = _detect_mode()
+    if mode is None:
+        print(
+            f"Error: no UGOW enforcement mode is installed.\n"
+            f"  Run 'sudo ./setup.sh' (FUSE) or 'sudo ./setup.sh --mode bpf' first.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    return mode
+
+
 def cmd_mount(args):
     require_root("mount")
-    _require_fuse_mode()
+    mode = _require_mode("mount")
     letter = _validate_drive(args.drive)
-    service = UNIT_TEMPLATE.format(letter)
-    result = subprocess.run(
-        ["systemctl", "enable", "--now", service],
-    )
-    if result.returncode == 0:
-        print(f"\nDrive {letter.upper()}: is now managed by UGOW at /mnt/{letter}")
-    else:
-        sys.exit(result.returncode)
+
+    if mode == "fuse":
+        service = UNIT_TEMPLATE.format(letter)
+        result = subprocess.run(
+            ["systemctl", "enable", "--now", service],
+        )
+        if result.returncode == 0:
+            print(f"\nDrive {letter.upper()}: is now managed by UGOW at /mnt/{letter}")
+        else:
+            sys.exit(result.returncode)
+
+    elif mode == "bpf":
+        mount_path = f"/mnt/{letter}"
+        if not os.path.isdir(mount_path):
+            print(f"Error: {mount_path} does not exist or is not mounted.",
+                  file=sys.stderr)
+            sys.exit(1)
+        result = subprocess.run(
+            [UGOW_PYTHON, UGOW_MANAGE, "add-device", mount_path],
+            capture_output=True, text=True,
+        )
+        if result.returncode == 0:
+            print(f"\nDrive {letter.upper()}: is now enforced by UGOW BPF at {mount_path}")
+        else:
+            print(f"Error: {result.stderr.strip()}", file=sys.stderr)
+            sys.exit(result.returncode)
 
 
 def cmd_unmount(args):
     require_root("unmount")
-    _require_fuse_mode()
+    mode = _require_mode("unmount")
     letter = _validate_drive(args.drive)
-    service = UNIT_TEMPLATE.format(letter)
 
-    result = subprocess.run(
-        ["systemctl", "disable", "--now", service],
-    )
-    if result.returncode == 0:
-        subprocess.run(
-            ["umount", f"/mnt/.{letter}-backing"],
-            capture_output=True,
+    if mode == "fuse":
+        service = UNIT_TEMPLATE.format(letter)
+        result = subprocess.run(
+            ["systemctl", "disable", "--now", service],
         )
-        subprocess.run(
-            ["mount", "-t", "drvfs", f"{letter.upper()}:",
-             f"/mnt/{letter}", "-o", "metadata"],
-            capture_output=True,
+        if result.returncode == 0:
+            subprocess.run(
+                ["umount", f"/mnt/.{letter}-backing"],
+                capture_output=True,
+            )
+            subprocess.run(
+                ["mount", "-t", "drvfs", f"{letter.upper()}:",
+                 f"/mnt/{letter}", "-o", "metadata"],
+                capture_output=True,
+            )
+            print(f"\nDrive {letter.upper()}: is no longer managed by UGOW")
+            print(f"  Re-mounted as standard DrvFs at /mnt/{letter}")
+        else:
+            sys.exit(result.returncode)
+
+    elif mode == "bpf":
+        mount_path = f"/mnt/{letter}"
+        result = subprocess.run(
+            [UGOW_PYTHON, UGOW_MANAGE, "remove-device", mount_path],
+            capture_output=True, text=True,
         )
-        print(f"\nDrive {letter.upper()}: is no longer managed by UGOW")
-        print(f"  Re-mounted as standard DrvFs at /mnt/{letter}")
-    else:
-        sys.exit(result.returncode)
+        if result.returncode == 0:
+            print(f"\nDrive {letter.upper()}: is no longer enforced by UGOW BPF")
+        else:
+            print(f"Error: {result.stderr.strip()}", file=sys.stderr)
+            sys.exit(result.returncode)
 
 
 def cmd_drives(args):
     require_root("drives")
-    _require_fuse_mode()
-    result = subprocess.run(
-        ["systemctl", "list-units", "wsl-fuse-shim@*.service",
-         "--plain", "--no-legend", "--all"],
-        capture_output=True, text=True,
-    )
-    lines = [l for l in result.stdout.strip().splitlines() if l.strip()]
-    if not lines:
-        print("No UGOW-managed drives.")
-        return
+    mode = _require_mode("drives")
 
-    print(f"{'Drive':<8} {'Mount':<16} {'Backing':<24} {'Status'}")
-    print(f"{'─' * 7} {'─' * 15} {'─' * 23} {'─' * 16}")
-    for line in lines:
-        parts = line.split()
-        if len(parts) < 4:
-            continue
-        unit = parts[0]
-        active, sub = parts[2], parts[3]
-        letter = unit.split("@")[1].split(".")[0]
-        status = f"{active} ({sub})"
-        print(f"{letter.upper()}:      /mnt/{letter:<12} /mnt/.{letter}-backing       {status}")
+    if mode == "fuse":
+        result = subprocess.run(
+            ["systemctl", "list-units", "wsl-fuse-shim@*.service",
+             "--plain", "--no-legend", "--all"],
+            capture_output=True, text=True,
+        )
+        lines = [l for l in result.stdout.strip().splitlines() if l.strip()]
+        if not lines:
+            print("No UGOW-managed drives.")
+            return
+
+        print(f"{'Drive':<8} {'Mount':<16} {'Backing':<24} {'Status'}")
+        print(f"{'─' * 7} {'─' * 15} {'─' * 23} {'─' * 16}")
+        for line in lines:
+            parts = line.split()
+            if len(parts) < 4:
+                continue
+            unit = parts[0]
+            active, sub = parts[2], parts[3]
+            letter = unit.split("@")[1].split(".")[0]
+            status = f"{active} ({sub})"
+            print(f"{letter.upper()}:      /mnt/{letter:<12} /mnt/.{letter}-backing       {status}")
+
+    elif mode == "bpf":
+        enforced = []
+        for letter in "abcdefghijklmnopqrstuvwxyz":
+            mount_path = f"/mnt/{letter}"
+            if not os.path.isdir(mount_path):
+                continue
+            try:
+                st = os.stat(mount_path)
+            except OSError:
+                continue
+            dev_key = struct.pack("=I", st.st_dev)
+            key_hex = " ".join(f"0x{b:02x}" for b in dev_key)
+            result = subprocess.run(
+                ["bpftool", "map", "lookup", "pinned",
+                 f"{BPF_PIN}/target_devs", "key", "hex"] + key_hex.split(),
+                capture_output=True, text=True,
+            )
+            if result.returncode == 0:
+                enforced.append(letter)
+
+        if not enforced:
+            print("No UGOW-managed drives (BPF mode).")
+            return
+
+        print(f"{'Drive':<8} {'Mount':<16} {'Mode'}")
+        print(f"{'─' * 7} {'─' * 15} {'─' * 10}")
+        for letter in enforced:
+            print(f"{letter.upper()}:      /mnt/{letter:<12} BPF")
 
 
 # ---------------------------------------------------------------------------
