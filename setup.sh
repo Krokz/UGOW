@@ -90,7 +90,7 @@ BANNER
   # Stop and disable FUSE shim units, collecting drive letters
   managed_drives=()
   for unit in $(systemctl list-units 'wsl-fuse-shim@*.service' \
-                --plain --no-legend --all 2>/dev/null | awk '{print $1}'); do
+                --plain --no-legend 2>/dev/null | awk '{print $1}'); do
     letter=$(echo "$unit" | sed 's/wsl-fuse-shim@\(.\)\.service/\1/')
     managed_drives+=("$letter")
     _spin "Stopping $unit" &
