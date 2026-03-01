@@ -97,6 +97,7 @@ BANNER
       _spin "Stopping $unit" &
       spin_pid=$!
       sudo systemctl disable --now "$unit" 2>/dev/null || true
+      sudo systemctl reset-failed "$unit" 2>/dev/null || true
       _spin_stop "$spin_pid" "Stopped $unit"
     done
     sudo rm -f /etc/systemd/system/wsl-fuse-shim@.service
