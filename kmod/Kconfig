@@ -1,0 +1,14 @@
+config SECURITY_UGOW
+	bool "UGOW W-bit permission enforcement for WSL2 drives"
+	depends on SECURITY
+	default n
+	help
+	  Adds a per-path, per-UID "write bit" that gates all write-class
+	  VFS operations on 9P (drvfs) superblocks in WSL2.
+
+	  Grants are managed via securityfs at:
+	    /sys/kernel/security/ugow/grant
+	    /sys/kernel/security/ugow/revoke
+	    /sys/kernel/security/ugow/grants
+
+	  If unsure, say N.

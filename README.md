@@ -1,94 +1,133 @@
 # UGOW
 
-`UGOW` is a FUSE-based shim for Windows Subsystem for Linux (WSL) that extends the standard Unix permission model (User/Group/Other) with an additional **W-bit** controlling Windows-side write permissions per Linux UID. When a Linux user is granted the W-bit on a path, all write operations under that path are enforced by the shim and mirrored to NTFS ACLs on the Windows host.
+**U**nix **G**rant **O**verlay for **W**indows drives in WSL2.
+
+UGOW extends the standard Unix permission model with an additional **W-bit** controlling Windows-side write permissions per Linux UID. Write operations on mounted Windows drives are gated by a SQLite-backed permission store and optionally mirrored to NTFS ACLs on the Windows host.
+
+---
+
+## Why
+
+It started with a QA engineer on our team. He was running a Docker container in WSL2, mounting a Windows-native path (`C:\Docker`) as a volume. The container ran as UID 9500 -- not the default Ubuntu UID 1000.
+
+Everything broke. The container couldn't write to its own mounted volume. The errors were cryptic. And every fix we found required changes on the Windows side -- NTFS ACL tweaks, `icacls` commands, folder permission dialogs. Nothing could be done from within WSL itself.
+
+That's the gap: WSL2 mounts Windows drives via `/mnt/c` with effectively wide-open Unix permissions (often `777`), but the actual NTFS ACLs underneath don't know or care about Linux UIDs. So you get the worst of both worlds -- Linux thinks everything is permitted, Windows disagrees, and there's no unified control plane.
+
+I couldn't find a clean solution, so I built one.
 
 ---
 
 ## Features
 
-* **Transparent overlay**: mounts over an existing Windows-Drived filesystem (e.g. `/mnt/c`) so all processes—including Docker containers—go through the shim.
-* **W-bit enforcement**: allows or denies `open`, `create`, `truncate`, `mkdir`, `unlink`, `rmdir`, and `rename` calls based on a JSON-backed permission map.
-* **Permission inheritance**: a grant on a directory applies to all descendants.
-* **Root remapping**: root in WSL is remapped to the user who launched the shim, so root inherits the same W-bit rights.
-* **ACL mirroring**: best-effort creation of corresponding Windows local users (`wsl_<UID>`) and NTFS ACL grants via PowerShell/`icacls`.
-* **CLI manager**: root can explicitly grant or revoke W-bit for any UID on any path using `--grant` and `--revoke` flags.
+* **Three enforcement backends** - choose between a FUSE overlay shim (easiest), BPF LSM hooks (fastest, kernel-level), or a compiled-in kernel LSM module (custom kernel builds). FUSE and BPF modes are mutually exclusive; the kmod is a standalone alternative for custom kernels.
+* **Multi-drive support** - manages any Windows drive (C:, D:, E:, ...) via systemd template units (FUSE mode) or device registration (BPF mode).
+* **W-bit enforcement** - gates `open`, `create`, `truncate`, `mkdir`, `unlink`, `rmdir`, `rename`, `symlink`, and `link` based on the permission store.
+* **Permission inheritance** - a grant on a directory applies to all descendants.
+* **Root remapping** (FUSE mode) - root in WSL is remapped to the user who launched the shim, so root inherits the same W-bit rights.
+* **ACL mirroring** - best-effort creation of corresponding Windows local users (`wsl_<UID>`) and NTFS ACL grants via PowerShell/`icacls`.
+* **Unified CLI** - `ugow allow`, `ugow deny`, `ugow check`, `ugow status`, `ugow list` - works identically across all backends.
 
 ---
 
 ## Installation
 
-1. **Install dependencies**:
+### Prerequisites
 
-   ```bash
-   sudo apt update
-   sudo apt install -y fuse libfuse2 python3-pip
-   sudo pip3 install fusepy xattr
-   ```
+```bash
+sudo apt update
+sudo apt install -y python3 python3-venv fuse libfuse2
+```
 
-2. **Copy `shim.py`** into a system location:
+For BPF mode, also install:
 
-   ```bash
-   sudo install -m 755 shim.py /usr/local/bin/ugow
-   ```
+```bash
+sudo apt install -y clang linux-tools-generic
+```
 
-3. **Enable FUSE**:
+### Install
 
-   * Uncomment `user_allow_other` in `/etc/fuse.conf`.
-   * Add your WSL user to the `fuse` group:
+```bash
+# FUSE mode (default) - easiest, no kernel requirements
+./install.sh
 
-     ```bash
-     sudo usermod -aG fuse $USER
-     ```
+# BPF mode - faster, kernel-level enforcement
+./install.sh --mode bpf
+```
 
-4. **Prepare metadata store**:
+The installer handles everything: CLI, permission store, Python venv, systemd units, and `wsl.conf` configuration. Drive C: is enabled by default.
 
-   ```bash
-   sudo mkdir -p /var/lib/wsl-fuse-shim
-   sudo chown $USER /var/lib/wsl-fuse-shim
-   ```
+### Uninstall
+
+```bash
+sudo ./install.sh --uninstall
+```
+
+This stops all services, removes installed files and BPF pins, and reloads systemd. The permission database (`/var/lib/ugow/wperm.db`) is preserved - delete it manually with `sudo rm -rf /var/lib/ugow` if desired. Run `wsl --shutdown` from Windows afterwards to apply `wsl.conf` changes.
+
+---
+
+## Enforcement Modes
+
+|  | FUSE | BPF | kmod |
+|---|---|---|---|
+| **Install** | `./install.sh` | `./install.sh --mode bpf` | Custom kernel build |
+| **Where it runs** | Userspace (FUSE) | Kernel (eBPF LSM) | Kernel (compiled-in LSM) |
+| **Needs custom kernel?** | No | No (stock WSL2) | Yes (`CONFIG_SECURITY_UGOW=y`) |
+| **Performance overhead** | Moderate (user/kernel bounce) | Near zero | Near zero |
+| **WSL automount** | Disabled (UGOW mounts drives) | Left enabled (BPF enforces on real mount) | Left enabled |
+| **Multi-drive** | `ugow mount d` | `ugow_manage.py add-device` | Automatic (all 9P mounts) |
+| **Grant interface** | SQLite | SQLite + BPF map | SQLite + securityfs |
+
+**FUSE and BPF are mutually exclusive.** The FUSE shim's own I/O to the backing filesystem would be blocked by BPF hooks, and BPF cannot see through the FUSE device. The installer detects conflicts and refuses to install if the other mode is active.
+
+The **kmod** (`kmod/ugow_lsm.c`) is a standalone option for custom WSL2 kernel builds. It is not covered by the installer - see `kmod/Kconfig` for build instructions. The CLI auto-detects it via `/sys/kernel/security/ugow/` and syncs grants to securityfs on `allow`/`deny`.
 
 ---
 
 ## Usage
 
-### 1. Mount a drive
+### Grant and revoke permissions
 
 ```bash
-ugow /mnt/c /mnt/c-shim \
-  -- foreground --allow_other --default_permissions
+ugow allow ubuntu /mnt/c/docker     # grant write access
+ugow deny  ubuntu /mnt/c/docker     # revoke write access
+ugow check /mnt/c/docker            # can I write here?
+ugow status /mnt/c/docker           # who can write here?
+ugow list                           # show all grants
 ```
 
-This mounts the shim over `/mnt/c`, exposing it at `/mnt/c-shim`. All operations under `/mnt/c-shim` are now gated by the W-bit logic.
+Users can be specified by name or numeric UID. `allow` and `deny` require root.
 
-### 2. Grant/Revoke W-bit via `chmod`
-
-As your WSL user:
+### Multi-drive management (FUSE mode)
 
 ```bash
-# Grant W-bit on /mnt/c-shim/data
-chmod +t /mnt/c-shim/data
-
-# Revoke W-bit
-chmod -t /mnt/c-shim/data
+ugow mount d        # enable UGOW on D:
+ugow mount e        # enable UGOW on E:
+ugow drives         # list all active drives
+ugow unmount d      # disable UGOW on D:
 ```
 
-### 3. Explicit CLI grants (root only)
+### Grant/Revoke W-bit via chmod (FUSE mode)
 
 ```bash
-# Grant UID 9500 write rights on a specific path
-sudo ugow --grant 9500 /mnt/c-shim/userdata
-
-# Revoke
-sudo ugow --revoke 9500 /mnt/c-shim/userdata
+chmod +t /mnt/c/data    # grant W-bit for current user
+chmod -t /mnt/c/data    # revoke W-bit for current user
 ```
 
-### 4. Using with Docker
+### Query W-bit via xattr (FUSE mode)
 
-When launching containers that mount Windows paths, point them at the shim mountpoint:
+```bash
+getfattr -n user.ugow.wbit /mnt/c/data    # "1" = granted, "0" = denied
+```
+
+### Using with Docker
+
+No special paths needed - Docker bind-mounts use `/mnt/c` as usual:
 
 ```bash
 docker run --user 9500 \
-  -v /mnt/c-shim/userdata:/data \
+  -v /mnt/c/userdata:/data \
   my-image
 ```
 
@@ -96,22 +135,95 @@ The container (UID 9500) will be able to write under `/data` only if you granted
 
 ---
 
-## Internals
+## Architecture
 
-* **Metadata**: stored in `/var/lib/wsl-fuse-shim/wperm.json` as a map of paths → list of UIDs.
-* **Path conversion**: Linux paths under `/mnt/<drive>/…` are translated to Windows paths (e.g. `C:\…`) for ACL commands.
-* **Sticky-bit**: `chmod +t`/`-t` toggles grant/revoke behavior in the FUSE `chmod()` handler.
+### FUSE mode
+
+Each drive gets its own isolated FUSE instance via a systemd template unit (`wsl-fuse-shim@<letter>.service`):
+
+```
+ /mnt/.<letter>-backing   <-- raw DrvFs, mode 0700, root-only
+          |
+      FUSE shim            <-- UGOWShim (permission checks, W-bit enforcement)
+          |
+     /mnt/<letter>          <-- what users and tools see (transparent)
+```
+
+### BPF mode
+
+BPF LSM hooks enforce directly on the real DrvFs mount:
+
+```
+     /mnt/<letter>          <-- real DrvFs (WSL automount)
+          |
+    BPF LSM hooks           <-- ugow_file_open, ugow_inode_permission, etc.
+          |
+     grants map             <-- (inode, dev, uid) -> allow/deny
+```
+
+### kmod mode
+
+Compiled-in LSM hooks enforce on all 9P superblocks:
+
+```
+     /mnt/<letter>          <-- real DrvFs (WSL automount)
+          |
+    LSM hooks               <-- ugow_inode_permission, ugow_file_open, etc.
+          |
+   in-kernel hash table     <-- path-based grants via securityfs
+```
+
+### Shared components
+
+```
+  permstore.py    <-- SQLite-backed grant store (shared by all backends)
+  cli.py          <-- ugow CLI (always installed)
+```
 
 ---
 
-## Future Work
+## Internals
 
-* Migrate JSON store to SQLite for scalability and ACID guarantees.
-* Support dynamic discovery and auto-mount of all `/mnt/<letter>` volumes via systemd templates.
-* Refine ACL mirroring to handle edge cases and user-management policies.
+* **Metadata** - stored in `/var/lib/ugow/wperm.db` (SQLite, WAL mode, thread-safe with per-thread connections).
+* **W-bit cache** - the permission store maintains a TTL-based in-memory cache (2 s) to reduce SQLite lookups on hot paths.
+* **Path conversion** - Linux paths under `/mnt/<drive>/...` are translated to Windows paths (e.g. `C:\...`) for ACL commands.
+* **Sticky-bit** (FUSE mode) - `chmod +t`/`-t` toggles grant/revoke in the FUSE `chmod()` handler.
+* **Backend detection** - the CLI auto-detects active backends (BPF via `/sys/fs/bpf/ugow/grants`, kmod via `/sys/kernel/security/ugow/grant`) and syncs grants to all active backends on `allow`/`deny`.
+* **ACL cleanup** - `shim.py --cleanup-acl` removes stale `wsl_*` Windows users whose UID has zero grants remaining.
+
+---
+
+## Development
+
+### Running tests
+
+```bash
+pip install -r requirements-dev.txt
+pytest tests/
+```
+
+### Project layout
+
+```
+cli.py              CLI entry point (installed as /usr/local/bin/ugow)
+shim.py             FUSE overlay filesystem
+permstore.py        SQLite-backed permission store
+install.sh          Installer / uninstaller
+bpf/
+  ugow.bpf.c        eBPF LSM program
+  ugow.h             Shared types (grant_key struct)
+  ugow_manage.py     BPF loader and map manager
+  Makefile            Builds ugow.bpf.o from kernel BTF
+kmod/
+  ugow_lsm.c         Compiled-in LSM module (custom kernel)
+  Kconfig             Kernel config entry
+  Makefile            Kbuild makefile
+tests/
+  test_cli.py         CLI and integration tests
+```
 
 ---
 
 ## License
 
-MIT © Your Name
+MIT
