@@ -3,6 +3,7 @@ import sys
 import tempfile
 import pytest
 
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "fuse"))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from shim import PermStore, UGOWShim  # noqa: E402

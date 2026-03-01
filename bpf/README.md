@@ -80,32 +80,15 @@ sudo ./setup.sh --mode bpf
 This builds the BPF program, installs all components, creates a systemd
 service, and enables enforcement on `/mnt/c` by default.
 
----
+### Add more drives
 
-## Manual usage
-
-If you prefer to manage the BPF program directly (without the installer):
-
-### Build
+The `ugow` CLI auto-detects BPF mode -- the same commands work for both FUSE
+and BPF:
 
 ```bash
-cd bpf/
-make
-```
-
-This generates `vmlinux.h` from your running kernel's BTF data and compiles
-`ugow.bpf.o`.
-
-### Load
-
-```bash
-sudo python3 ugow_manage.py load
-```
-
-### Register a drive for enforcement
-
-```bash
-sudo python3 ugow_manage.py add-device /mnt/c
+sudo ugow mount d         # enable UGOW enforcement on D:
+sudo ugow drives          # list enforced drives
+sudo ugow unmount d       # stop enforcing on D:
 ```
 
 Only devices registered this way are subject to W-bit checks. Other
@@ -113,34 +96,30 @@ filesystems (ext4, tmpfs, etc.) are completely unaffected.
 
 ### Grant / revoke write access
 
-The recommended way is through the unified CLI:
-
 ```bash
 sudo ugow allow 9500 /mnt/c/data
 sudo ugow deny  9500 /mnt/c/data
 ```
 
-The CLI automatically syncs grants to both SQLite and the BPF map when
-BPF is active. You can also use the manager directly:
+The CLI automatically syncs grants to both SQLite and the BPF map.
+
+---
+
+## Manual usage
+
+If you prefer to manage the BPF program directly (without the installer):
 
 ```bash
+cd bpf/
+make                                              # build ugow.bpf.o
+sudo python3 ugow_manage.py load                  # load and attach LSM hooks
+sudo python3 ugow_manage.py add-device /mnt/c     # register a drive
 sudo python3 ugow_manage.py grant 9500 /mnt/c/data
 sudo python3 ugow_manage.py revoke 9500 /mnt/c/data
-```
-
-### Sync existing grants into BPF
-
-If you already have grants in SQLite (e.g. from prior FUSE usage):
-
-```bash
-sudo python3 ugow_manage.py sync
-```
-
-### List / unload
-
-```bash
-sudo python3 ugow_manage.py list      # show BPF map entries
-sudo python3 ugow_manage.py unload    # detach hooks and unpin programs
+sudo python3 ugow_manage.py remove-device /mnt/d  # stop enforcing a drive
+sudo python3 ugow_manage.py sync                  # sync SQLite -> BPF map
+sudo python3 ugow_manage.py list                  # show BPF map entries
+sudo python3 ugow_manage.py unload                # detach and unpin
 ```
 
 ---

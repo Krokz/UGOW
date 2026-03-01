@@ -112,7 +112,7 @@ This stops all services, removes installed files and BPF pins, and reloads syste
 | **Performance overhead** | Moderate (user/kernel bounce) | Near zero | Near zero |
 | **WSL automount** | Disabled (UGOW mounts drives) | Left enabled (BPF enforces on real mount) | Left enabled |
 | **Root bypasses enforcement?** | No (remapped to launching user) | Yes (uid 0 is always allowed) | Configurable |
-| **Multi-drive** | `ugow mount d` | `ugow_manage.py add-device` | Automatic (all 9P mounts) |
+| **Multi-drive** | `ugow mount d` | `ugow mount d` | Automatic (all 9P mounts) |
 | **Grant interface** | SQLite | SQLite + BPF map | SQLite + securityfs |
 
 **FUSE and BPF are mutually exclusive.** The FUSE shim's own I/O to the backing filesystem would be blocked by BPF hooks, and BPF cannot see through the FUSE device. The installer detects conflicts and refuses to install if the other mode is active.
@@ -136,13 +136,15 @@ sudo ugow list                           # show all grants
 
 Users can be specified by name or numeric UID. All commands require root (`sudo`). The `check` command uses `SUDO_UID` to test the *calling* user's permissions, not root's.
 
-### Multi-drive management (FUSE mode)
+### Multi-drive management
+
+Works the same regardless of whether FUSE or BPF mode is installed:
 
 ```bash
 sudo ugow mount d        # enable UGOW on D:
 sudo ugow mount e        # enable UGOW on E:
 sudo ugow drives         # list all active drives
-sudo ugow unmount d      # disable UGOW on D: (re-mounts as standard DrvFs)
+sudo ugow unmount d      # disable UGOW on D:
 ```
 
 ### Query W-bit via xattr (FUSE mode)
@@ -238,19 +240,23 @@ pytest tests/ -v
 
 ```
 cli.py                CLI entry point (installed as /usr/local/bin/ugow)
-shim.py               FUSE overlay daemon
 permstore.py          SQLite-backed permission store
 setup.sh              Installer / uninstaller
-mount-backing.sh      Helper script for DrvFs mount retries
+fuse/
+  shim.py              FUSE overlay daemon
+  mount-backing.sh     DrvFs backing mount helper with retry logic
+  README.md            FUSE-specific documentation
 bpf/
   ugow.bpf.c          eBPF LSM program
   ugow.h               Shared types (grant_key struct)
   ugow_manage.py       BPF loader and map manager
   Makefile              Builds ugow.bpf.o from kernel BTF
+  README.md            BPF-specific documentation
 kmod/
   ugow_lsm.c           Compiled-in LSM module (custom kernel)
   Kconfig               Kernel config entry
   Makefile              Kbuild makefile
+  README.md            kmod-specific documentation
 tests/
   conftest.py           Shared pytest fixtures
   test_permstore.py     Permission store unit tests

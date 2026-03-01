@@ -299,10 +299,10 @@ if [[ "$MODE" == "fuse" ]]; then
     echo "$SHIM_BIN exists and doesn't look like UGOW shim. Aborting." >&2
     exit 1
   fi
-  sudo install -m 755 "$SCRIPT_DIR/shim.py" "$SHIM_BIN"
+  sudo install -m 755 "$SCRIPT_DIR/fuse/shim.py" "$SHIM_BIN"
   echo "# Shim: UGOW" | sudo tee -a "$SHIM_BIN" >/dev/null
   sudo install -m 644 "$SCRIPT_DIR/permstore.py" "$UGOW_LIB/permstore.py"
-  sudo install -m 755 "$SCRIPT_DIR/mount-backing.sh" "$UGOW_LIB/mount-backing.sh"
+  sudo install -m 755 "$SCRIPT_DIR/fuse/mount-backing.sh" "$UGOW_LIB/mount-backing.sh"
 
   # Enable user_allow_other in /etc/fuse.conf
   if ! grep -q '^user_allow_other' "$FUSE_CONF"; then
