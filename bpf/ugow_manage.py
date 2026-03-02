@@ -64,11 +64,15 @@ def grant_key_hex(ino, dev, uid):
 
 
 def map_update(map_path, key_hex, value_hex="0x01"):
-    run([
+    r = run([
         "bpftool", "map", "update", "pinned", map_path,
         "key", "hex"] + key_hex.split() + [
         "value", "hex", value_hex,
-    ])
+    ], check=False)
+    if r.returncode != 0:
+        log.error("bpftool map update failed (rc=%d): %s",
+                  r.returncode, r.stderr.strip())
+        raise subprocess.CalledProcessError(r.returncode, r.args)
 
 
 def map_delete(map_path, key_hex):
@@ -106,18 +110,27 @@ def cmd_load(args):
     """Load the BPF program and pin maps."""
     _ensure_bpffs()
 
-    if os.path.exists(PIN_PATH):
+    maps_pinned = all(
+        os.path.exists(f"{PIN_PATH}/{m}") for m in ("target_devs", "grants")
+    )
+    if maps_pinned:
         log.info("BPF programs already pinned at %s", PIN_PATH)
         return
+
+    if os.path.exists(PIN_PATH):
+        log.info("Cleaning stale pin directory %s", PIN_PATH)
+        run(["rm", "-rf", PIN_PATH], check=False)
 
     os.makedirs(PIN_PATH, exist_ok=True)
 
     r = run([
         "bpftool", "prog", "loadall", BPF_OBJ, PIN_PATH,
         "type", "lsm", "autoattach",
+        "pinmaps", PIN_PATH,
     ], check=False)
     if r.returncode != 0:
         log.error("Failed to load/attach BPF program: %s", r.stderr.strip())
+        run(["rm", "-rf", PIN_PATH], check=False)
         sys.exit(1)
     log.info("BPF LSM programs loaded, pinned, and attached at %s", PIN_PATH)
 
