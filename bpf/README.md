@@ -68,7 +68,19 @@ cat /sys/kernel/security/lsm
 ### 2. Install build dependencies
 
 ```bash
-sudo apt install -y clang llvm libbpf-dev linux-tools-common bpftool
+sudo apt install -y clang llvm libbpf-dev build-essential libelf-dev libssl-dev
+```
+
+The WSL2 kernel is custom-built by Microsoft, so there's no matching
+`linux-tools` package for `bpftool`. Build it from source:
+
+```bash
+git clone --depth 1 https://github.com/libbpf/bpftool.git
+cd bpftool
+git submodule update --init --depth 1
+cd src && make && sudo make install
+hash -r
+bpftool version   # should show v7.x.x
 ```
 
 ### 3. Install via setup.sh

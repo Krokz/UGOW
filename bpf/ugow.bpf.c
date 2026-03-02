@@ -15,6 +15,11 @@
  */
 
 #include "vmlinux.h"
+
+#ifndef EACCES
+#define EACCES 13
+#endif
+
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
 #include <bpf/bpf_core_read.h>
