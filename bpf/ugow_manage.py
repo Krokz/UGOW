@@ -88,8 +88,24 @@ def map_dump(map_path):
 
 # -- High-level commands ---------------------------------------------------
 
+def _ensure_bpffs():
+    """Mount bpffs at /sys/fs/bpf if not already mounted."""
+    if os.path.ismount("/sys/fs/bpf"):
+        return
+    r = subprocess.run(
+        ["mount", "-t", "bpf", "bpffs", "/sys/fs/bpf"],
+        capture_output=True, text=True,
+    )
+    if r.returncode != 0:
+        log.error("Failed to mount bpffs: %s", r.stderr.strip())
+        sys.exit(1)
+    log.info("Mounted bpffs at /sys/fs/bpf")
+
+
 def cmd_load(args):
     """Load the BPF program and pin maps."""
+    _ensure_bpffs()
+
     if os.path.exists(PIN_PATH):
         log.info("BPF programs already pinned at %s", PIN_PATH)
         return
