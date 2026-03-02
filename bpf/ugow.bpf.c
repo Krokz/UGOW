@@ -224,21 +224,16 @@ int BPF_PROG(ugow_inode_rename, struct inode *old_dir,
 	     struct dentry *old_dentry, struct inode *new_dir,
 	     struct dentry *new_dentry)
 {
-	bool old_target = is_target_dev(old_dir);
-	bool new_target = is_target_dev(new_dir);
-	if (!old_target && !new_target)
-		return 0;
-
 	__u32 uid = bpf_get_current_uid_gid() & 0xFFFFFFFF;
 	if (uid == 0)
 		return 0;
 
-	if (old_target) {
+	if (is_target_dev(old_dir)) {
 		int ret = check_parent_wbit(old_dentry, uid);
 		if (ret)
 			return ret;
 	}
-	if (new_target)
+	if (is_target_dev(new_dir))
 		return check_parent_wbit(new_dentry, uid);
 	return 0;
 }
