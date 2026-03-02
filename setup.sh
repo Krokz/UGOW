@@ -395,18 +395,65 @@ if [[ "$MODE" == "bpf" ]]; then
   BPF_LIB=/opt/ugow/bpf
 
   # Check prerequisites
-  for cmd in clang bpftool; do
-    if ! command -v "$cmd" &>/dev/null; then
-      echo "Error: '$cmd' is required for BPF mode but not found." >&2
-      echo "  Install with: sudo apt install -y clang linux-tools-generic" >&2
-      exit 1
-    fi
-  done
+  if ! command -v clang &>/dev/null; then
+    echo "Error: 'clang' is required for BPF mode but not found." >&2
+    echo "  Install with: sudo apt install -y clang" >&2
+    exit 1
+  fi
+
+  if ! command -v bpftool &>/dev/null; then
+    cat >&2 <<'BPFTOOL_HELP'
+Error: 'bpftool' is required for BPF mode but not found.
+
+  The WSL2 kernel ships a custom version that doesn't have a matching
+  linux-tools package. Build bpftool from source instead:
+
+    sudo apt install -y build-essential libelf-dev libssl-dev llvm clang
+    git clone --depth 1 https://github.com/libbpf/bpftool.git
+    cd bpftool
+    git submodule update --init --depth 1
+    cd src && make && sudo make install
+    hash -r   # refresh shell command cache
+
+BPFTOOL_HELP
+    exit 1
+  fi
 
   if [ ! -f /sys/kernel/btf/vmlinux ]; then
     echo "Error: kernel BTF not available at /sys/kernel/btf/vmlinux." >&2
     echo "  Your kernel needs CONFIG_DEBUG_INFO_BTF=y (stock WSL2 kernel has this)." >&2
     exit 1
+  fi
+
+  # Check if BPF LSM is in the active security module list
+  _lsm_list=""
+  if mount -t securityfs securityfs /sys/kernel/security 2>/dev/null; then true; fi
+  if [ -f /sys/kernel/security/lsm ]; then
+    _lsm_list="$(cat /sys/kernel/security/lsm)"
+  fi
+  if [ -n "$_lsm_list" ] && ! echo "$_lsm_list" | grep -q '\bbpf\b'; then
+    cat >&2 <<'LSM_HELP'
+Warning: BPF is not in the active LSM list.
+
+  The BPF programs will load but LSM hooks won't attach. To fix this,
+  create or edit %USERPROFILE%\.wslconfig on the Windows side:
+
+    [wsl2]
+    kernelCommandLine = lsm=landlock,lockdown,yama,loadpin,safesetid,integrity,apparmor,bpf
+
+  Then restart WSL:  wsl --shutdown
+
+LSM_HELP
+    read -rp "  Continue anyway? [y/N] " _ans
+    if [[ ! "$_ans" =~ ^[Yy] ]]; then
+      exit 1
+    fi
+  fi
+
+  # Clean stale vmlinux.h from previous failed builds
+  if [ -f "$SCRIPT_DIR/bpf/vmlinux.h" ] && [ ! -s "$SCRIPT_DIR/bpf/vmlinux.h" ]; then
+    echo "  Removing empty vmlinux.h from previous build..."
+    rm -f "$SCRIPT_DIR/bpf/vmlinux.h"
   fi
 
   # Build the BPF object
