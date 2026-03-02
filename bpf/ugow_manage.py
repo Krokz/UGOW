@@ -114,36 +114,12 @@ def cmd_load(args):
 
     r = run([
         "bpftool", "prog", "loadall", BPF_OBJ, PIN_PATH,
-        "type", "lsm",
+        "type", "lsm", "autoattach",
     ], check=False)
     if r.returncode != 0:
-        log.error("Failed to load BPF program: %s", r.stderr.strip())
+        log.error("Failed to load/attach BPF program: %s", r.stderr.strip())
         sys.exit(1)
-    log.info("BPF programs loaded and pinned at %s", PIN_PATH)
-
-    r = run(["bpftool", "prog", "list", "-j"])
-    progs = json.loads(r.stdout)
-    attached = 0
-    failed = []
-    for p in progs:
-        if p.get("name", "").startswith("ugow_"):
-            prog_id = p["id"]
-            ar = run([
-                "bpftool", "prog", "attach", "id", str(prog_id), "lsm",
-            ], check=False)
-            if ar.returncode == 0:
-                attached += 1
-            else:
-                failed.append(p["name"])
-
-    if failed:
-        log.error("Failed to attach LSM hooks: %s", ", ".join(failed))
-        sys.exit(1)
-    if attached == 0:
-        log.error("No ugow_* BPF programs found to attach")
-        sys.exit(1)
-
-    log.info("LSM hooks attached (%d programs)", attached)
+    log.info("BPF LSM programs loaded, pinned, and attached at %s", PIN_PATH)
 
 
 def cmd_unload(args):
