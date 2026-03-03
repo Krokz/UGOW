@@ -1,5 +1,8 @@
 # Kernel Module
 
+!!! danger "Not yet tested or integrated"
+    The kernel module backend is **experimental and currently unused**. It has not been tested against a real WSL2 kernel build. The source is included for future development only. For kernel-level enforcement today, use [BPF mode](bpf.md).
+
 A Linux Security Module that enforces W-bit permissions directly in the kernel VFS layer for 9P (DrvFs) mounts in WSL2.
 
 !!! warning "Requires a custom WSL2 kernel build"
