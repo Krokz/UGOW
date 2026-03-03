@@ -106,7 +106,7 @@ def _bpf_grant(uid, path):
     except FileNotFoundError:
         print(f"  warning: BPF sync skipped -- path not found: {path}",
               file=sys.stderr)
-        return
+        return False
     raw = struct.pack("=QII", st.st_ino, st.st_dev, uid)
     key_hex = " ".join(f"0x{b:02x}" for b in raw)
     result = subprocess.run(
@@ -117,6 +117,8 @@ def _bpf_grant(uid, path):
     if result.returncode != 0:
         print(f"  warning: BPF grant sync failed: {result.stderr.strip()}",
               file=sys.stderr)
+        return False
+    return True
 
 
 def _bpf_revoke(uid, path):
@@ -155,6 +157,27 @@ def _kmod_write(action, uid, path):
 
 
 # ---------------------------------------------------------------------------
+# DAC helpers for BPF mode
+# ---------------------------------------------------------------------------
+
+def _relax_dac_for_bpf(path):
+    """Ensure DAC allows writes on *path* so the BPF LSM is the sole gate.
+
+    On DrvFs, default permissions are rwxrwxrwx.  Paths that were manually
+    restricted (chmod / chown) block writes at the DAC layer before BPF even
+    runs.  Adding the write bits lets BPF be the real enforcement.
+    """
+    try:
+        st = os.stat(path)
+        if st.st_mode & 0o222 == 0o222:
+            return
+        os.chmod(path, st.st_mode | 0o222)
+    except OSError as e:
+        print(f"  warning: could not relax DAC permissions on {path}: {e}",
+              file=sys.stderr)
+
+
+# ---------------------------------------------------------------------------
 # Commands
 # ---------------------------------------------------------------------------
 
@@ -167,7 +190,8 @@ def cmd_allow(args):
     store.grant(path, uid)
 
     if _bpf_active():
-        _bpf_grant(uid, path)
+        if _bpf_grant(uid, path):
+            _relax_dac_for_bpf(path)
     if _kmod_active():
         _kmod_write("grant", uid, path)
 
