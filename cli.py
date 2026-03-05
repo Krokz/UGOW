@@ -8,6 +8,7 @@ Usage:
     ugow check <path>            Check if you can write to a path
     ugow status <path>           Show who can write to a path
     ugow list                    List all grants
+    ugow sync                    Sync SQLite grants into kernel backends
     ugow mount <drive>           Enable UGOW on a Windows drive
     ugow unmount <drive>         Disable UGOW on a Windows drive
     ugow drives                  List active UGOW-managed drives
@@ -29,6 +30,8 @@ from permstore import PermStore, DEFAULT_DB_PATH, _path_ancestors  # noqa: E402
 
 BPF_PIN = "/sys/fs/bpf/ugow"
 KMOD_SECURITYFS = "/sys/kernel/security/ugow"
+UGOW_MANAGE = "/opt/ugow/lib/ugow_manage.py"
+UGOW_PYTHON = "/opt/ugow/venv/bin/python"
 
 
 # ---------------------------------------------------------------------------
@@ -151,9 +154,12 @@ def _kmod_write(action, uid, path):
     except PermissionError:
         print(f"  warning: kmod {action} failed -- permission denied "
               f"(need root?)", file=sys.stderr)
+        return False
     except FileNotFoundError:
         print(f"  warning: kmod {action} failed -- securityfs interface "
               f"not found", file=sys.stderr)
+        return False
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -268,6 +274,49 @@ def cmd_status(args):
     print(f"Active backends: {', '.join(backends)}")
 
 
+def cmd_sync(args):
+    require_root("sync")
+    store = PermStore(db_path=args.db, mirror_acl=False)
+    grants = store.list_grants()
+
+    backends = _active_backends()
+    has_kmod = _kmod_active()
+    has_bpf = _bpf_active()
+
+    if not has_kmod and not has_bpf:
+        print("No kernel backend active (kmod or BPF). Nothing to sync.")
+        return
+
+    synced = {"kmod": 0, "bpf": 0}
+
+    if has_bpf:
+        result = subprocess.run(
+            [UGOW_PYTHON, UGOW_MANAGE, "sync", "--db", args.db],
+            capture_output=True, text=True,
+        )
+        if result.returncode == 0:
+            for line in result.stderr.splitlines():
+                if "Synced" in line:
+                    try:
+                        synced["bpf"] = int(line.split("Synced")[1].split()[0])
+                    except (IndexError, ValueError):
+                        pass
+            if synced["bpf"] == 0:
+                synced["bpf"] = len(grants)
+            print(f"  BPF: synced {synced['bpf']} grants")
+        else:
+            err = (result.stderr or result.stdout or "").strip()
+            print(f"  BPF sync failed: {err}", file=sys.stderr)
+
+    if has_kmod:
+        for path, uid in grants:
+            if _kmod_write("grant", uid, path):
+                synced["kmod"] += 1
+        print(f"  kmod: synced {synced['kmod']} grants")
+
+    print(f"\nSync complete. Active backends: {', '.join(backends)}")
+
+
 def cmd_list(args):
     require_root("list")
     store = PermStore(db_path=args.db, mirror_acl=False)
@@ -292,8 +341,6 @@ def cmd_list(args):
 
 UNIT_TEMPLATE = "wsl-fuse-shim@{}.service"
 FUSE_TEMPLATE_PATH = "/etc/systemd/system/wsl-fuse-shim@.service"
-UGOW_MANAGE = "/opt/ugow/lib/ugow_manage.py"
-UGOW_PYTHON = "/opt/ugow/venv/bin/python"
 
 
 def _fuse_installed():
@@ -470,6 +517,7 @@ def main():
                "  ugow check /mnt/c/docker\n"
                "  ugow status /mnt/c/docker\n"
                "  ugow list\n"
+               "  ugow sync\n"
                "  ugow mount d\n"
                "  ugow unmount d\n"
                "  ugow drives\n",
@@ -496,6 +544,7 @@ def main():
     p.add_argument("path", help="Path to inspect")
 
     sub.add_parser("list", help="List all grants")
+    sub.add_parser("sync", help="Replay SQLite grants into kernel backends (kmod/BPF)")
 
     p = sub.add_parser("mount", help="Enable UGOW on a Windows drive")
     p.add_argument("drive", help="Drive letter (e.g. d, e, f)")
@@ -516,6 +565,7 @@ def main():
         "check": cmd_check,
         "status": cmd_status,
         "list": cmd_list,
+        "sync": cmd_sync,
         "mount": cmd_mount,
         "unmount": cmd_unmount,
         "drives": cmd_drives,

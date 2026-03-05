@@ -1,0 +1,11 @@
+[Unit]
+Description=UGOW kmod grant sync (replay SQLite into securityfs)
+After=local-fs.target
+ConditionPathExists=/sys/kernel/security/ugow/grant
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/ugow sync
+
+[Install]
+WantedBy=multi-user.target

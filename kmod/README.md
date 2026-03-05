@@ -106,6 +106,37 @@ sudo ugow deny  9500 /mnt/c/data
 
 ---
 
+## Persistence across reboots
+
+The kmod's grant table lives in kernel memory and is lost on every
+`wsl --shutdown` or reboot. The `ugow` CLI stores all grants in SQLite
+(`/var/lib/ugow/wperm.db`), so they survive reboots -- but the kernel
+needs to be re-populated on startup.
+
+### Option A: systemd service (recommended)
+
+Install the included unit to auto-sync at boot:
+
+```bash
+sudo cp /path/to/UGOW/kmod/ugow-sync.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable ugow-sync.service
+```
+
+This runs `ugow sync` on every boot, replaying all SQLite grants into the
+kmod's securityfs interface. It only activates when the kmod is present
+(`ConditionPathExists=/sys/kernel/security/ugow/grant`).
+
+### Option B: manual sync
+
+After any reboot, run:
+
+```bash
+sudo ugow sync
+```
+
+---
+
 ## How it works
 
 The LSM hooks into the kernel's VFS layer at these points:
