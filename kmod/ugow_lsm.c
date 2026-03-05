@@ -77,23 +77,18 @@ static bool ugow_has_grant_locked(const char *path, kuid_t uid)
  * inheritance semantics of the userspace shim: a grant on a directory
  * covers all descendants.
  */
-static bool ugow_check_wbit(const char *path, kuid_t uid)
+static bool ugow_check_wbit(char *path, kuid_t uid)
 {
-	char buf[UGOW_PATH_MAX];
 	char *slash;
 	bool found;
 
-	if (strlen(path) >= sizeof(buf))
-		return false;
-	strscpy(buf, path, sizeof(buf));
-
 	rcu_read_lock();
 	for (;;) {
-		found = ugow_has_grant_rcu(buf, uid);
+		found = ugow_has_grant_rcu(path, uid);
 		if (found)
 			break;
-		slash = strrchr(buf, '/');
-		if (!slash || slash == buf) {
+		slash = strrchr(path, '/');
+		if (!slash || slash == path) {
 			found = ugow_has_grant_rcu("/", uid);
 			break;
 		}
@@ -181,71 +176,89 @@ static bool ugow_is_target_sb(struct super_block *sb)
 static int ugow_inode_permission(struct inode *inode, int mask)
 {
 	struct dentry *dentry;
-	char pathbuf[UGOW_PATH_MAX];
+	char *pathbuf;
 	kuid_t uid;
-	int err;
+	int err, ret = -EACCES;
 
 	if (!(mask & MAY_WRITE))
 		return 0;
 	if (!ugow_is_target_sb(inode->i_sb))
 		return 0;
 
+	pathbuf = kmalloc(UGOW_PATH_MAX, GFP_KERNEL);
+	if (!pathbuf)
+		return -ENOMEM;
+
 	uid = current_fsuid();
 
 	dentry = d_find_any_alias(inode);
 	if (!dentry)
-		return -EACCES;
+		goto out;
 
-	err = ugow_dentry_path(dentry, pathbuf, sizeof(pathbuf));
+	err = ugow_dentry_path(dentry, pathbuf, UGOW_PATH_MAX);
 	dput(dentry);
 	if (err)
-		return -EACCES;
+		goto out;
 
-	if (!ugow_check_wbit(pathbuf, uid))
-		return -EACCES;
-	return 0;
+	if (ugow_check_wbit(pathbuf, uid))
+		ret = 0;
+out:
+	kfree(pathbuf);
+	return ret;
 }
 
 static int ugow_file_open(struct file *file)
 {
 	struct dentry *dentry;
-	char pathbuf[UGOW_PATH_MAX];
+	char *pathbuf;
 	kuid_t uid;
-	int err;
+	int err, ret = -EACCES;
 
 	if (!(file->f_mode & FMODE_WRITE))
 		return 0;
 	if (!ugow_is_target_sb(file_inode(file)->i_sb))
 		return 0;
 
+	pathbuf = kmalloc(UGOW_PATH_MAX, GFP_KERNEL);
+	if (!pathbuf)
+		return -ENOMEM;
+
 	uid = current_fsuid();
 	dentry = file->f_path.dentry;
 
-	err = ugow_dentry_path(dentry, pathbuf, sizeof(pathbuf));
+	err = ugow_dentry_path(dentry, pathbuf, UGOW_PATH_MAX);
 	if (err)
-		return -EACCES;
+		goto out;
 
-	if (!ugow_check_wbit(pathbuf, uid))
-		return -EACCES;
-	return 0;
+	if (ugow_check_wbit(pathbuf, uid))
+		ret = 0;
+out:
+	kfree(pathbuf);
+	return ret;
 }
 
 static int ugow_check_parent_wbit(struct dentry *parent)
 {
-	char pathbuf[UGOW_PATH_MAX];
+	char *pathbuf;
 	kuid_t uid = current_fsuid();
-	int err;
+	int err, ret = -EACCES;
 
 	if (!ugow_is_target_sb(parent->d_sb))
 		return 0;
 
-	err = ugow_dentry_path(parent, pathbuf, sizeof(pathbuf));
-	if (err)
-		return -EACCES;
+	pathbuf = kmalloc(UGOW_PATH_MAX, GFP_KERNEL);
+	if (!pathbuf)
+		return -ENOMEM;
 
-	if (!ugow_check_wbit(pathbuf, uid))
-		return -EACCES;
-	return 0;
+	err = ugow_dentry_path(parent, pathbuf, UGOW_PATH_MAX);
+	if (err)
+		goto out;
+
+	if (ugow_check_wbit(pathbuf, uid))
+		ret = 0;
+out:
+	kfree(pathbuf);
+	return ret;
 }
 
 static int ugow_inode_create(struct inode *dir, struct dentry *dentry,
@@ -315,72 +328,103 @@ static struct dentry *ugow_list_file;
 static int parse_uid_path(const char __user *buf, size_t count,
 			  kuid_t *uid_out, char *path_out, size_t path_max)
 {
-	char kbuf[UGOW_PATH_MAX + 32];
+	char *kbuf;
 	char *space;
 	unsigned long uid_val;
 	int err;
 
-	if (count >= sizeof(kbuf))
+	if (count >= UGOW_PATH_MAX + 32)
 		return -EINVAL;
-	if (copy_from_user(kbuf, buf, count))
-		return -EFAULT;
+
+	kbuf = kmalloc(count + 1, GFP_KERNEL);
+	if (!kbuf)
+		return -ENOMEM;
+
+	if (copy_from_user(kbuf, buf, count)) {
+		err = -EFAULT;
+		goto out;
+	}
 	kbuf[count] = '\0';
-	/* Strip trailing newline */
 	if (count > 0 && kbuf[count - 1] == '\n')
 		kbuf[count - 1] = '\0';
 
 	space = strchr(kbuf, ' ');
-	if (!space)
-		return -EINVAL;
+	if (!space) {
+		err = -EINVAL;
+		goto out;
+	}
 	*space = '\0';
 
 	err = kstrtoul(kbuf, 10, &uid_val);
 	if (err)
-		return err;
+		goto out;
 	*uid_out = make_kuid(current_user_ns(), (uid_t)uid_val);
-	if (!uid_valid(*uid_out))
-		return -EINVAL;
+	if (!uid_valid(*uid_out)) {
+		err = -EINVAL;
+		goto out;
+	}
 
-	if (strlen(space + 1) >= path_max)
-		return -ENAMETOOLONG;
+	if (strlen(space + 1) >= path_max) {
+		err = -ENAMETOOLONG;
+		goto out;
+	}
 	strscpy(path_out, space + 1, path_max);
-	return 0;
+	err = 0;
+out:
+	kfree(kbuf);
+	return err;
 }
 
 static ssize_t ugow_grant_write(struct file *file, const char __user *buf,
 				size_t count, loff_t *ppos)
 {
-	char path[UGOW_PATH_MAX];
+	char *path;
 	kuid_t uid;
 	int err;
 
 	if (!capable(CAP_SYS_ADMIN))
 		return -EPERM;
 
-	err = parse_uid_path(buf, count, &uid, path, sizeof(path));
+	path = kmalloc(UGOW_PATH_MAX, GFP_KERNEL);
+	if (!path)
+		return -ENOMEM;
+
+	err = parse_uid_path(buf, count, &uid, path, UGOW_PATH_MAX);
 	if (err)
-		return err;
+		goto out;
 
 	err = ugow_add_grant(path, uid);
-	return err ? err : count;
+	if (!err)
+		err = count;
+out:
+	kfree(path);
+	return err;
 }
 
 static ssize_t ugow_revoke_write(struct file *file, const char __user *buf,
 				 size_t count, loff_t *ppos)
 {
-	char path[UGOW_PATH_MAX];
+	char *path;
 	kuid_t uid;
 	int err;
 
 	if (!capable(CAP_SYS_ADMIN))
 		return -EPERM;
 
-	err = parse_uid_path(buf, count, &uid, path, sizeof(path));
+	path = kmalloc(UGOW_PATH_MAX, GFP_KERNEL);
+	if (!path)
+		return -ENOMEM;
+
+	err = parse_uid_path(buf, count, &uid, path, UGOW_PATH_MAX);
 	if (err)
-		return err;
+		goto out;
 
 	err = ugow_remove_grant(path, uid);
-	return err ? err : count;
+	if (!err)
+		err = count;
+out:
+	kfree(path);
+	return err;
 }
 
 static void *ugow_list_start(struct seq_file *s, loff_t *pos)
