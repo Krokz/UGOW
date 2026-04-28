@@ -8,6 +8,9 @@
 
 # UGOW
 
+[![Tests](https://github.com/Krokz/UGOW/actions/workflows/tests.yml/badge.svg)](https://github.com/Krokz/UGOW/actions/workflows/tests.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 **U**nix **G**rant **O**verlay for **W**indows drives in WSL2.
 
 UGOW adds fine-grained, per-user write control to Windows drives mounted in WSL2. Write operations on `/mnt/c`, `/mnt/d`, etc. are gated by a SQLite-backed permission store and optionally mirrored to NTFS ACLs on the Windows host.
