@@ -9,6 +9,7 @@ Usage:
     ugow status <path>           Show who can write to a path
     ugow list                    List all grants
     ugow sync                    Sync SQLite grants into kernel backends
+    ugow acl-cleanup             Drop mirrored Windows users with no grants
     ugow mount <drive>           Enable UGOW on a Windows drive
     ugow unmount <drive>         Disable UGOW on a Windows drive
     ugow drives                  List active UGOW-managed drives
@@ -26,7 +27,13 @@ for _p in [_HERE, "/opt/ugow/lib"]:
     if os.path.isfile(os.path.join(_p, "permstore.py")):
         sys.path.insert(0, _p)
         break
-from permstore import PermStore, DEFAULT_DB_PATH, _path_ancestors  # noqa: E402
+from permstore import (  # noqa: E402
+    AclMirrorUnavailable,
+    DEFAULT_DB_PATH,
+    PermStore,
+    _path_ancestors,
+    kernel_dev,
+)
 
 BPF_PIN = "/sys/fs/bpf/ugow"
 KMOD_SECURITYFS = "/sys/kernel/security/ugow"
@@ -103,83 +110,162 @@ def uid_to_name(uid):
 # BPF map helpers (only called when BPF backend is active)
 # ---------------------------------------------------------------------------
 
-def _bpf_grant(uid, path):
+def _run(cmd):
+    """Run a helper binary, turning a missing binary into a readable error."""
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, check=False)
+    except FileNotFoundError:
+        return subprocess.CompletedProcess(
+            cmd, 127, "", f"{cmd[0]} not found on PATH"
+        )
+
+
+def _bpf_key_hex(uid, path):
+    """Encode the (ino, dev, uid) grant key, or None if the path is missing."""
     try:
         st = os.stat(path)
-    except FileNotFoundError:
-        print(f"  warning: BPF sync skipped -- path not found: {path}",
-              file=sys.stderr)
-        return False
-    raw = struct.pack("=QII", st.st_ino, st.st_dev, uid)
-    key_hex = " ".join(f"0x{b:02x}" for b in raw)
-    result = subprocess.run(
+    except OSError as e:
+        return None, str(e)
+    raw = struct.pack("=QII", st.st_ino, kernel_dev(st.st_dev), uid)
+    return " ".join(f"0x{b:02x}" for b in raw), None
+
+
+def _bpf_grant(uid, path):
+    """Add a BPF map entry. Returns None on success or an error string."""
+    key_hex, err = _bpf_key_hex(uid, path)
+    if key_hex is None:
+        return (f"BPF grants are keyed by inode, so the path must exist: {err}")
+    result = _run(
         ["bpftool", "map", "update", "pinned", f"{BPF_PIN}/grants",
-         "key", "hex"] + key_hex.split() + ["value", "hex", "0x01"],
-        capture_output=True, text=True, check=False,
+         "key", "hex"] + key_hex.split() + ["value", "hex", "0x01"]
     )
     if result.returncode != 0:
-        print(f"  warning: BPF grant sync failed: {result.stderr.strip()}",
-              file=sys.stderr)
-        return False
-    return True
+        return f"BPF grant failed: {result.stderr.strip()}"
+    return None
 
 
 def _bpf_revoke(uid, path):
-    try:
-        st = os.stat(path)
-    except FileNotFoundError:
-        print(f"  warning: BPF sync skipped -- path not found: {path}",
-              file=sys.stderr)
-        return
-    raw = struct.pack("=QII", st.st_ino, st.st_dev, uid)
-    key_hex = " ".join(f"0x{b:02x}" for b in raw)
-    result = subprocess.run(
+    """Delete a BPF map entry. Returns None on success or an error string."""
+    key_hex, err = _bpf_key_hex(uid, path)
+    if key_hex is None:
+        # Nothing to remove: an entry can only exist for a path that resolved.
+        return None
+    result = _run(
         ["bpftool", "map", "delete", "pinned", f"{BPF_PIN}/grants",
-         "key", "hex"] + key_hex.split(),
-        capture_output=True, text=True, check=False,
+         "key", "hex"] + key_hex.split()
     )
     if result.returncode != 0:
-        print(f"  warning: BPF revoke sync failed: {result.stderr.strip()}",
-              file=sys.stderr)
+        stderr = result.stderr.strip()
+        if "No such file or directory" in stderr or "ENOENT" in stderr:
+            return None
+        return f"BPF revoke failed: {stderr}"
+    return None
 
 
 # ---------------------------------------------------------------------------
 # kmod securityfs helpers
 # ---------------------------------------------------------------------------
 
-def _kmod_write(action, uid, path):
+def _mount_point(path):
+    """Innermost mount point containing *path*."""
+    path = os.path.abspath(path)
+    while True:
+        if os.path.ismount(path):
+            return path
+        parent = os.path.dirname(path)
+        if parent == path:
+            return path
+        path = parent
+
+
+def _kmod_key(path):
+    """Return (dev, superblock-relative path) for *path*.
+
+    The kmod derives a dentry's path with dentry_path_raw(), which stops at the
+    filesystem root -- so /mnt/c/docker is /docker there. Grants must be
+    expressed the same way, paired with the device so identical relative paths
+    on different drives stay distinct.
+    """
+    st = os.stat(path)
+    dev = f"{os.major(st.st_dev)}:{os.minor(st.st_dev)}"
+    mount = _mount_point(path)
+    rel = path if mount == "/" else path[len(mount):]
+    if not rel.startswith("/"):
+        rel = "/" + rel
+    return dev, os.path.normpath(rel)
+
+
+def _kmod_securityfs_write(name, payload):
+    """Write one line to a kmod securityfs file. Returns an error or None."""
     try:
-        with open(f"{KMOD_SECURITYFS}/{action}", "w") as f:
-            f.write(f"{uid} {path}\n")
+        with open(f"{KMOD_SECURITYFS}/{name}", "w") as f:
+            f.write(payload + "\n")
     except PermissionError:
-        print(f"  warning: kmod {action} failed -- permission denied "
-              f"(need root?)", file=sys.stderr)
-        return False
+        return f"kmod {name} failed: permission denied (need root?)"
     except FileNotFoundError:
-        print(f"  warning: kmod {action} failed -- securityfs interface "
-              f"not found", file=sys.stderr)
-        return False
-    return True
+        return f"kmod {name} failed: securityfs interface not found"
+    except OSError as e:
+        return f"kmod {name} failed: {e}"
+    return None
+
+
+def _kmod_register_device(path):
+    """Register the device backing *path* for enforcement."""
+    try:
+        dev, _ = _kmod_key(path)
+    except OSError as e:
+        return f"kmod device registration failed: {e}"
+    return _kmod_securityfs_write("devices", f"+{dev}")
+
+
+def _kmod_write(action, uid, path):
+    """Push a grant/revoke to the kmod. Returns an error string or None."""
+    try:
+        dev, rel = _kmod_key(path)
+    except OSError as e:
+        return f"kmod {action} needs the path to exist to resolve its device: {e}"
+    # A grant is meaningless unless the device is enforced.
+    if action == "grant":
+        err = _kmod_register_device(path)
+        if err:
+            return err
+    return _kmod_securityfs_write(action, f"{uid} {dev} {rel}")
 
 
 # ---------------------------------------------------------------------------
 # DAC helpers for BPF mode
 # ---------------------------------------------------------------------------
 
-def _relax_dac_for_bpf(path):
+def _relax_dac_for_bpf(store, path):
     """Ensure DAC allows writes on *path* so the BPF LSM is the sole gate.
 
     On DrvFs, default permissions are rwxrwxrwx.  Paths that were manually
     restricted (chmod / chown) block writes at the DAC layer before BPF even
-    runs.  Adding the write bits lets BPF be the real enforcement.
+    runs.  The original mode is recorded first so `ugow deny` can put it back:
+    a widened mode left behind after the hooks detach would be an open door.
     """
     try:
         st = os.stat(path)
         if st.st_mode & 0o222 == 0o222:
             return
+        store.remember_dac_mode(path, st.st_mode)
         os.chmod(path, st.st_mode | 0o222)
     except OSError as e:
         print(f"  warning: could not relax DAC permissions on {path}: {e}",
+              file=sys.stderr)
+
+
+def _restore_dac_after_bpf(store, path):
+    """Undo _relax_dac_for_bpf once no uid holds a grant on *path*."""
+    if store.has_any_grant(path):
+        return
+    mode = store.forget_dac_mode(path)
+    if mode is None:
+        return
+    try:
+        os.chmod(path, mode & 0o7777)
+    except OSError as e:
+        print(f"  warning: could not restore permissions on {path}: {e}",
               file=sys.stderr)
 
 
@@ -193,13 +279,29 @@ def cmd_allow(args):
     path = os.path.abspath(args.path)
 
     store = PermStore(db_path=args.db, mirror_acl=args.mirror_acl)
-    store.grant(path, uid)
 
+    # Kernel backends first: committing to SQLite before they accept the grant
+    # would leave `ugow check` reporting a permission the kernel will refuse.
+    errors = []
     if _bpf_active():
-        if _bpf_grant(uid, path):
-            _relax_dac_for_bpf(path)
+        err = _bpf_grant(uid, path)
+        if err:
+            errors.append(err)
     if _kmod_active():
-        _kmod_write("grant", uid, path)
+        err = _kmod_write("grant", uid, path)
+        if err:
+            errors.append(err)
+
+    if errors:
+        print(f"Error: grant not applied for {username} (uid={uid}) on {path}",
+              file=sys.stderr)
+        for err in errors:
+            print(f"  {err}", file=sys.stderr)
+        sys.exit(1)
+
+    store.grant(path, uid)
+    if _bpf_active():
+        _relax_dac_for_bpf(store, path)
 
     backends = _active_backends()
     print(f"Allowed: {username} (uid={uid}) can write to {path}")
@@ -214,18 +316,34 @@ def cmd_deny(args):
     path = os.path.abspath(args.path)
 
     store = PermStore(db_path=args.db, mirror_acl=args.mirror_acl)
+
+    # Revoke is the reverse: drop the authoritative record first so a partial
+    # failure errs toward denying rather than keeping a stale permission.
     store.revoke(path, uid)
 
+    errors = []
     if _bpf_active():
-        _bpf_revoke(uid, path)
+        err = _bpf_revoke(uid, path)
+        if err:
+            errors.append(err)
+        _restore_dac_after_bpf(store, path)
     if _kmod_active():
-        _kmod_write("revoke", uid, path)
+        err = _kmod_write("revoke", uid, path)
+        if err:
+            errors.append(err)
 
     backends = _active_backends()
     print(f"Denied: {username} (uid={uid}) can no longer write to {path}")
     if len(backends) > 1:
         print(f"  backends: {', '.join(backends)}")
     store.flush_acl()
+
+    if errors:
+        print("Warning: revoked in the permission store, but a backend "
+              "reported an error:", file=sys.stderr)
+        for err in errors:
+            print(f"  {err}", file=sys.stderr)
+        sys.exit(1)
 
 
 def cmd_check(args):
@@ -288,10 +406,11 @@ def cmd_sync(args):
         return
 
     synced = {"kmod": 0, "bpf": 0}
+    failed = False
 
     if has_bpf:
         result = subprocess.run(
-            [UGOW_PYTHON, UGOW_MANAGE, "sync", "--db", args.db],
+            [UGOW_PYTHON, UGOW_MANAGE, "--db", args.db, "sync"],
             capture_output=True, text=True,
         )
         if result.returncode == 0:
@@ -301,20 +420,39 @@ def cmd_sync(args):
                         synced["bpf"] = int(line.split("Synced")[1].split()[0])
                     except (IndexError, ValueError):
                         pass
-            if synced["bpf"] == 0:
-                synced["bpf"] = len(grants)
             print(f"  BPF: synced {synced['bpf']} grants")
         else:
             err = (result.stderr or result.stdout or "").strip()
             print(f"  BPF sync failed: {err}", file=sys.stderr)
+            failed = True
 
     if has_kmod:
+        skipped = 0
         for path, uid in grants:
-            if _kmod_write("grant", uid, path):
+            err = _kmod_write("grant", uid, path)
+            if err is None:
                 synced["kmod"] += 1
-        print(f"  kmod: synced {synced['kmod']} grants")
+            elif not os.path.exists(path):
+                # Nothing to resolve a device from; the SQLite grant stands and
+                # will apply once the path exists and sync runs again.
+                skipped += 1
+            else:
+                print(f"  {err}", file=sys.stderr)
+                failed = True
+        print(f"  kmod: synced {synced['kmod']} grants"
+              + (f" ({skipped} skipped -- path missing)" if skipped else ""))
 
+    if failed:
+        print(f"\nSync finished with errors. Active backends: {', '.join(backends)}")
+        sys.exit(1)
     print(f"\nSync complete. Active backends: {', '.join(backends)}")
+
+
+def cmd_acl_cleanup(args):
+    require_root("acl-cleanup")
+    store = PermStore(db_path=args.db, mirror_acl=False)
+    store.cleanup_acl()
+    print("ACL cleanup complete.")
 
 
 def cmd_list(args):
@@ -397,10 +535,7 @@ def cmd_mount(args):
             print(f"Error: {mount_path} does not exist or is not mounted.",
                   file=sys.stderr)
             sys.exit(1)
-        result = subprocess.run(
-            [UGOW_PYTHON, UGOW_MANAGE, "add-device", mount_path],
-            capture_output=True, text=True,
-        )
+        result = _run([UGOW_PYTHON, UGOW_MANAGE, "add-device", mount_path])
         if result.returncode == 0:
             print(f"\nDrive {letter.upper()}: is now enforced by UGOW BPF at {mount_path}")
         else:
@@ -435,10 +570,7 @@ def cmd_unmount(args):
 
     elif mode == "bpf":
         mount_path = f"/mnt/{letter}"
-        result = subprocess.run(
-            [UGOW_PYTHON, UGOW_MANAGE, "remove-device", mount_path],
-            capture_output=True, text=True,
-        )
+        result = _run([UGOW_PYTHON, UGOW_MANAGE, "remove-device", mount_path])
         if result.returncode == 0:
             print(f"\nDrive {letter.upper()}: is no longer enforced by UGOW BPF")
         else:
@@ -483,12 +615,11 @@ def cmd_drives(args):
                 st = os.stat(mount_path)
             except OSError:
                 continue
-            dev_key = struct.pack("=I", st.st_dev)
+            dev_key = struct.pack("=I", kernel_dev(st.st_dev))
             key_hex = " ".join(f"0x{b:02x}" for b in dev_key)
-            result = subprocess.run(
+            result = _run(
                 ["bpftool", "map", "lookup", "pinned",
-                 f"{BPF_PIN}/target_devs", "key", "hex"] + key_hex.split(),
-                capture_output=True, text=True,
+                 f"{BPF_PIN}/target_devs", "key", "hex"] + key_hex.split()
             )
             if result.returncode == 0:
                 enforced.append(letter)
@@ -545,6 +676,8 @@ def main():
 
     sub.add_parser("list", help="List all grants")
     sub.add_parser("sync", help="Replay SQLite grants into kernel backends (kmod/BPF)")
+    sub.add_parser("acl-cleanup",
+                   help="Remove mirrored Windows wsl_* users with no grants")
 
     p = sub.add_parser("mount", help="Enable UGOW on a Windows drive")
     p.add_argument("drive", help="Drive letter (e.g. d, e, f)")
@@ -566,11 +699,16 @@ def main():
         "status": cmd_status,
         "list": cmd_list,
         "sync": cmd_sync,
+        "acl-cleanup": cmd_acl_cleanup,
         "mount": cmd_mount,
         "unmount": cmd_unmount,
         "drives": cmd_drives,
     }
-    handler[args.command](args)
+    try:
+        handler[args.command](args)
+    except AclMirrorUnavailable as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":
