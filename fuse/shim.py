@@ -18,6 +18,14 @@ LAUNCHER_UID = None
 
 log = logging.getLogger("ugow")
 
+# setuid/setgid on a Windows drive buys nothing and is a privilege-escalation
+# primitive if the mount is ever missing nosuid, so the shim never sets them.
+_MODE_MASK = 0o1777
+
+
+def _safe_mode(mode):
+    return mode & _MODE_MASK
+
 
 # ---------------------------------------------------------------------------
 # FUSE filesystem
@@ -41,6 +49,25 @@ class UGOWShim(Operations):
         if real_uid == 0 and LAUNCHER_UID is not None:
             return LAUNCHER_UID
         return real_uid
+
+    def _deny(self, op, backing_path, uid, reason, err=errno.EACCES):
+        """Log and raise. Every denial is auditable."""
+        log.warning(
+            "deny %s uid=%d path=%s (%s)",
+            op, uid, self._grant_path(backing_path), reason,
+        )
+        raise OSError(err, reason)
+
+    def _require_wbit(self, op, backing_path, uid):
+        """Raise EACCES unless *uid* holds the W-bit on *backing_path*."""
+        if not self.store.has_wbit(self._grant_path(backing_path), uid):
+            self._deny(op, backing_path, uid, "no W permission")
+
+    def _require_parent_wbit(self, op, backing_path, uid):
+        """Raise EACCES unless *uid* holds the W-bit on the parent directory."""
+        parent = os.path.dirname(backing_path)
+        if not self.store.has_wbit(self._grant_path(parent), uid):
+            self._deny(op, parent, uid, "no W permission on parent")
 
     def _full_path(self, path):
         full = os.path.abspath(os.path.join(self.root, path.lstrip("/")))
@@ -91,9 +118,7 @@ class UGOWShim(Operations):
     def access(self, path, amode):
         full = self._full_path(path)
         if amode & os.W_OK:
-            uid = self._effective_uid()
-            if not self.store.has_wbit(self._grant_path(full), uid):
-                raise OSError(errno.EACCES, "No W permission")
+            self._require_wbit("access", full, self._effective_uid())
         if not os.access(full, amode):
             raise OSError(errno.EACCES, "")
 
@@ -119,31 +144,29 @@ class UGOWShim(Operations):
 
     def open(self, path, flags):
         full = self._full_path(path)
-        uid = self._effective_uid()
-        if flags & (os.O_WRONLY | os.O_RDWR) and not self.store.has_wbit(self._grant_path(full), uid):
-            raise OSError(errno.EACCES, "No W permission")
+        if flags & (os.O_WRONLY | os.O_RDWR | os.O_TRUNC | os.O_APPEND):
+            self._require_wbit("open", full, self._effective_uid())
         return os.open(full, flags)
 
     def create(self, path, mode, fi=None):
         full = self._full_path(path)
-        uid = self._effective_uid()
-        if not self.store.has_wbit(self._grant_path(os.path.dirname(full)), uid):
-            raise OSError(errno.EACCES, "No W on parent")
-        return os.open(full, os.O_WRONLY | os.O_CREAT, mode)
+        self._require_parent_wbit("create", full, self._effective_uid())
+        # fusepy's create() carries no flags, so O_EXCL cannot be honoured here;
+        # the kernel's lookup-then-create path decides existence instead.
+        return os.open(full, os.O_WRONLY | os.O_CREAT, _safe_mode(mode))
 
     def read(self, path, size, offset, fh):
-        os.lseek(fh, offset, os.SEEK_SET)
-        return os.read(fh, size)
+        # Positioned I/O: fusepy dispatches multithreaded, so a shared
+        # lseek+read would race the file offset between concurrent ops.
+        return os.pread(fh, size, offset)
 
     def write(self, path, buf, offset, fh):
-        os.lseek(fh, offset, os.SEEK_SET)
-        return os.write(fh, buf)
+        # Positioned I/O -- see read() for why we avoid lseek+write.
+        return os.pwrite(fh, buf, offset)
 
     def truncate(self, path, length, fh=None):
         full = self._full_path(path)
-        uid = self._effective_uid()
-        if not self.store.has_wbit(self._grant_path(full), uid):
-            raise OSError(errno.EACCES, "No W permission")
+        self._require_wbit("truncate", full, self._effective_uid())
         if fh is not None:
             os.ftruncate(fh, length)
         else:
@@ -152,7 +175,10 @@ class UGOWShim(Operations):
         return 0
 
     def flush(self, path, fh):
-        return os.fsync(fh)
+        # flush() fires on every close(); fsync-on-close would force a disk
+        # sync per close on already-slow 9P/DrvFs. Durability is left to the
+        # fsync() hook, which callers invoke explicitly when they need it.
+        return 0
 
     def release(self, path, fh):
         return os.close(fh)
@@ -166,41 +192,32 @@ class UGOWShim(Operations):
 
     def mkdir(self, path, mode):
         full = self._full_path(path)
-        uid = self._effective_uid()
-        if not self.store.has_wbit(self._grant_path(os.path.dirname(full)), uid):
-            raise OSError(errno.EACCES, "No W on parent")
-        return os.mkdir(full, mode)
+        self._require_parent_wbit("mkdir", full, self._effective_uid())
+        return os.mkdir(full, _safe_mode(mode))
 
     def rmdir(self, path):
         full = self._full_path(path)
-        uid = self._effective_uid()
-        if not self.store.has_wbit(self._grant_path(os.path.dirname(full)), uid):
-            raise OSError(errno.EACCES, "No W on parent")
+        self._require_parent_wbit("rmdir", full, self._effective_uid())
         return os.rmdir(full)
 
     # -- Entry operations ---------------------------------------------------
 
     def unlink(self, path):
         full = self._full_path(path)
-        uid = self._effective_uid()
-        if not self.store.has_wbit(self._grant_path(os.path.dirname(full)), uid):
-            raise OSError(errno.EACCES, "No W on parent")
+        self._require_parent_wbit("unlink", full, self._effective_uid())
         return os.unlink(full)
 
     def rename(self, old, new):
         old_p, new_p = self._full_path(old), self._full_path(new)
         uid = self._effective_uid()
-        if not self.store.has_wbit(self._grant_path(os.path.dirname(old_p)), uid) or \
-           not self.store.has_wbit(self._grant_path(os.path.dirname(new_p)), uid):
-            raise OSError(errno.EACCES, "No W on parent")
+        self._require_parent_wbit("rename", old_p, uid)
+        self._require_parent_wbit("rename", new_p, uid)
         return os.rename(old_p, new_p)
 
     def symlink(self, target, source):
         """Create a symlink at *target* pointing to *source*."""
         new_link = self._full_path(target)
-        uid = self._effective_uid()
-        if not self.store.has_wbit(self._grant_path(os.path.dirname(new_link)), uid):
-            raise OSError(errno.EACCES, "No W on parent")
+        self._require_parent_wbit("symlink", new_link, self._effective_uid())
         return os.symlink(source, new_link)
 
     def link(self, target, source):
@@ -208,25 +225,36 @@ class UGOWShim(Operations):
         new_link = self._full_path(target)
         existing = self._full_path(source)
         uid = self._effective_uid()
-        if not self.store.has_wbit(self._grant_path(os.path.dirname(new_link)), uid):
-            raise OSError(errno.EACCES, "No W on parent")
+        self._require_parent_wbit("link", new_link, uid)
+        # A second name must not grant rights the first name did not have:
+        # without this, linking a protected file into a granted directory
+        # would make it writable through the new path.
+        self._require_wbit("link", existing, uid)
         return os.link(existing, new_link)
 
     # -- Permission / attribute operations ----------------------------------
 
     def chmod(self, path, mode):
         full = self._full_path(path)
-        os.chmod(full, mode & 0o7777)
+        # chmod is a write to the file's metadata and must be gated like any
+        # other write -- the shim runs as root, so an ungated chmod would let
+        # any caller re-mode every file on the drive.
+        self._require_wbit("chmod", full, self._effective_uid())
+        os.chmod(full, _safe_mode(mode))
         return 0
 
     def chown(self, path, uid, gid):
-        caller_uid = self._effective_uid()
-        if caller_uid != 0:
-            raise OSError(errno.EPERM, "Only root can chown")
+        # Compare the *real* caller uid: _effective_uid() remaps root to the
+        # launching user, which would make this test unsatisfiable for root.
+        real_uid, _, _ = fuse_get_context()
+        if real_uid != 0:
+            self._deny("chown", self._full_path(path), real_uid,
+                       "only root can chown", err=errno.EPERM)
         return os.lchown(self._full_path(path), uid, gid)
 
     def utimens(self, path, times=None):
         full = self._full_path(path)
+        self._require_wbit("utimens", full, self._effective_uid())
         os.utime(full, times=times)
 
 
@@ -268,9 +296,17 @@ if __name__ == "__main__":
         if uid != 0:
             LAUNCHER_UID = uid
 
-    store = PermStore(db_path=args.db, mirror_acl=args.mirror_acl)
+    store = PermStore(db_path=args.db, mirror_acl=args.mirror_acl, watch_db=True)
 
     FUSE(
         UGOWShim(args.root, args.mountpoint, store), args.mountpoint,
         foreground=True, allow_other=True, default_permissions=True,
+        # nosuid/nodev: the backing store is a Windows drive that any granted
+        # user can write to, so it must never carry privilege bits.
+        nosuid=True, nodev=True,
+        # getattr() reports the W-bit in st_mode for the *calling* uid, but the
+        # kernel's attribute cache is per-inode. Caching would let one user's
+        # mode answer decide default_permissions checks for another user, so
+        # attributes and lookups must not be cached.
+        attr_timeout=0, entry_timeout=0, negative_timeout=0,
     )

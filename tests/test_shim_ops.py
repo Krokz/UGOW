@@ -1,5 +1,6 @@
 import os
 import errno
+import stat
 import pytest
 from shim import UGOWShim
 
@@ -249,13 +250,40 @@ class TestSymlinkLink:
 
 
 class TestChmod:
-    def test_chmod_passthrough(self, shim, backing_root, mock_fuse_ctx):
+    def test_chmod_denied_without_wbit(self, shim, backing_root, mock_fuse_ctx):
+        """chmod is a metadata write and must be gated: the shim runs as root,
+        so an ungated chmod would let any caller re-mode the whole drive."""
         mock_fuse_ctx(UID)
         fpath = os.path.join(backing_root, "ch.txt")
         with open(fpath, "w") as f:
             f.write("")
+        os.chmod(fpath, 0o644)
+        with pytest.raises(OSError) as exc:
+            shim.chmod("/ch.txt", 0o777)
+        assert exc.value.errno == errno.EACCES
+        assert os.stat(fpath).st_mode & 0o7777 == 0o644
+
+    def test_chmod_allowed_with_wbit(self, shim, store, backing_root, mock_fuse_ctx):
+        mock_fuse_ctx(UID)
+        fpath = os.path.join(backing_root, "ch.txt")
+        with open(fpath, "w") as f:
+            f.write("")
+        store.grant(fpath, UID)
         shim.chmod("/ch.txt", 0o755)
         assert os.stat(fpath).st_mode & 0o7777 == 0o755
+
+    def test_chmod_strips_setuid_setgid(self, shim, store, backing_root, mock_fuse_ctx):
+        """A granted user must not be able to create a setuid binary."""
+        mock_fuse_ctx(UID)
+        fpath = os.path.join(backing_root, "suid.txt")
+        with open(fpath, "w") as f:
+            f.write("")
+        store.grant(fpath, UID)
+        shim.chmod("/suid.txt", 0o6755)
+        mode = os.stat(fpath).st_mode
+        assert not mode & stat.S_ISUID
+        assert not mode & stat.S_ISGID
+        assert mode & 0o777 == 0o755
 
     def test_chmod_does_not_grant_wbit(self, shim, store, backing_root, mock_fuse_ctx):
         """chmod +t must NOT grant W-bit -- grants only via 'sudo ugow allow'."""
@@ -263,7 +291,9 @@ class TestChmod:
         fpath = os.path.join(backing_root, "sticky.txt")
         with open(fpath, "w") as f:
             f.write("")
+        store.grant(fpath, UID)
         shim.chmod("/sticky.txt", 0o1644)
+        store.revoke(fpath, UID)
         assert store.has_wbit(fpath, UID) is False
 
 
@@ -322,7 +352,7 @@ class TestReleaseFlush:
         with pytest.raises(OSError):
             os.read(fh, 1)
 
-    def test_flush_syncs_fd(self, shim, store, backing_root, mock_fuse_ctx):
+    def test_flush_succeeds(self, shim, store, backing_root, mock_fuse_ctx):
         mock_fuse_ctx(UID)
         fpath = os.path.join(backing_root, "fl.txt")
         with open(fpath, "w") as f:

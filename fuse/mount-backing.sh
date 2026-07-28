@@ -6,8 +6,11 @@ BACKING="/mnt/.${LETTER}-backing"
 
 mountpoint -q "$BACKING" && exit 0
 
+# nosuid,nodev: any granted user can write here through the shim, so the
+# backing store must never be able to carry privilege bits or device nodes.
 for n in $(seq 1 5); do
-    mount -t drvfs "$(echo "$LETTER" | tr a-z A-Z):" "$BACKING" -o metadata,umask=077 && exit 0
+    mount -t drvfs "$(echo "$LETTER" | tr a-z A-Z):" "$BACKING" \
+        -o metadata,umask=077,nosuid,nodev && exit 0
     sleep 2
 done
 
