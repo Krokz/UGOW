@@ -67,12 +67,16 @@ cat /sys/kernel/security/lsm
 
 ### 2. Install build dependencies
 
+`clang` and `libbpf-dev` are hard requirements -- `ugow.bpf.c` includes
+`<bpf/bpf_helpers.h>`, and `setup.sh` checks for both before building. The rest
+of this list is what building `bpftool` needs:
+
 ```bash
 sudo apt install -y clang llvm libbpf-dev build-essential libelf-dev libssl-dev
 ```
 
-The WSL2 kernel is custom-built by Microsoft, so there's no matching
-`linux-tools` package for `bpftool`. Build it from source:
+`bpftool` is required too. The WSL2 kernel is custom-built by Microsoft, so
+there's no matching `linux-tools` package. Build it from source:
 
 ```bash
 git clone --depth 1 https://github.com/libbpf/bpftool.git
@@ -126,6 +130,7 @@ cd bpf/
 make                                              # build ugow.bpf.o
 sudo python3 ugow_manage.py load                  # load and attach LSM hooks
 sudo python3 ugow_manage.py add-device /mnt/c     # register a drive
+sudo python3 ugow_manage.py restore-devices       # re-register all recorded drives
 sudo python3 ugow_manage.py grant 9500 /mnt/c/data
 sudo python3 ugow_manage.py revoke 9500 /mnt/c/data
 sudo python3 ugow_manage.py remove-device /mnt/d  # stop enforcing a drive
@@ -142,12 +147,22 @@ sudo python3 ugow_manage.py unload                # detach and unpin
   uid)` integer keys, avoiding BPF's string limitations entirely. The
   userspace loader resolves paths via `stat()`.
 
-- **Inheritance** -- the BPF program walks up the dentry tree (bounded to 32
-  levels) checking each ancestor, so a grant on `/mnt/c/data` covers
-  `/mnt/c/data/sub/file.txt`.
+- **Inheritance** -- the BPF program walks up the dentry tree (bounded to 64
+  levels, `MAX_PATH_DEPTH` in `ugow.h`) checking each ancestor, so a grant on
+  `/mnt/c/data` covers `/mnt/c/data/sub/file.txt`.
+
+- **Filesystem UID, not real UID** -- the hooks read `cred->fsuid` rather than
+  the real UID from `bpf_get_current_uid_gid()`. The two diverge whenever a task
+  has called `setfsuid()`, and `fsuid` is the identity the kernel's own DAC
+  check uses.
 
 - **Device filtering** -- only mounts registered via `add-device` trigger
   enforcement. This prevents accidental lockouts on system filesystems.
+  Registered drive letters are recorded in `/var/lib/ugow/drives`, and
+  `restore-devices` re-registers them at boot: pins live in a tmpfs and device
+  numbers are reassigned on every `wsl --shutdown`, so a drive left out would
+  come back unenforced while still carrying the permissions `ugow allow` widened
+  for it.
 
 - **Root exemption** -- uid 0 is always allowed through all hooks, preventing
   root lockout if the BPF maps are empty or misconfigured.
@@ -155,6 +170,10 @@ sudo python3 ugow_manage.py unload                # detach and unpin
 - **Cross-device rename protection** -- the rename hook checks both the source
   and destination directories against `target_devs`, preventing files from
   being renamed into a protected directory from an unprotected one.
+
+- **Hard links are checked on both ends** -- `inode_link` requires the W-bit on
+  the destination's parent *and* on the existing file, so a link created inside
+  a granted directory cannot expose a protected file through its second name.
 
 - **Shared database** -- grants live in the same SQLite DB as the FUSE shim
   (`/var/lib/ugow/wperm.db`), so you can switch between enforcement layers

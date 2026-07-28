@@ -5,9 +5,10 @@ Thanks for your interest in contributing! Here's how to get started.
 ## Getting Started
 
 1. Fork the repository and clone your fork.
-2. Install development dependencies:
+2. Install the runtime and development dependencies. The FUSE shim tests import
+   `fuse`, so both files are needed:
    ```bash
-   pip install -r requirements-dev.txt
+   pip install -r requirements.txt -r requirements-dev.txt
    ```
 3. Run the tests:
    ```bash
@@ -38,4 +39,4 @@ Open an issue with:
 
 ## Scope
 
-The FUSE and BPF backends are the primary focus. The kmod backend is experimental and not yet integrated into the installer, so contributions there are welcome but may take longer to review.
+The FUSE and BPF backends are the primary focus. The kmod backend is experimental, unverified against a real kernel build, and not integrated into the installer, so contributions there are welcome but may take longer to review.
