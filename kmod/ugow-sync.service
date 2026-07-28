@@ -1,7 +1,8 @@
 [Unit]
-Description=UGOW kmod grant sync (replay SQLite into securityfs)
+Description=UGOW grant sync (replay SQLite into active kernel backends)
 After=local-fs.target
-ConditionPathExists=/sys/kernel/security/ugow/grant
+ConditionPathExists=|/sys/kernel/security/ugow/grant
+ConditionPathExists=|/sys/fs/bpf/ugow/grants
 
 [Service]
 Type=oneshot
