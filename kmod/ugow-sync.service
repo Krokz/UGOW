@@ -1,0 +1,12 @@
+[Unit]
+Description=UGOW grant sync (replay SQLite into active kernel backends)
+After=local-fs.target
+ConditionPathExists=|/sys/kernel/security/ugow/grant
+ConditionPathExists=|/sys/fs/bpf/ugow/grants
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/ugow sync
+
+[Install]
+WantedBy=multi-user.target

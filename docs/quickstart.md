@@ -7,11 +7,14 @@ sudo apt update
 sudo apt install -y python3 python3-venv fuse libfuse2
 ```
 
-For BPF mode, also install:
+For BPF mode, also install `clang` and the libbpf headers:
 
 ```bash
-sudo apt install -y clang linux-tools-generic
+sudo apt install -y clang libbpf-dev
 ```
+
+!!! note "bpftool must be built from source"
+    `bpftool` is also required. The WSL2 kernel is custom-built by Microsoft, so no `linux-tools` package matches it -- see the [BPF mode prerequisites](bpf.md#2-install-build-dependencies) for the build steps.
 
 ## Install
 

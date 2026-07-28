@@ -38,10 +38,11 @@ I couldn't find a clean solution, so I built one.
 
 - :material-shield-lock: **Three enforcement backends** -- choose FUSE (easiest), BPF LSM (fastest), or a compiled-in kernel module.
 - :material-harddisk: **Multi-drive support** -- manage any Windows drive (C:, D:, E:, ...) with a single command.
-- :material-file-lock: **W-bit enforcement** -- gates `open`, `create`, `truncate`, `mkdir`, `unlink`, `rmdir`, `rename`, `symlink`, and `link`.
+- :material-file-lock: **W-bit enforcement** -- gates `access`, `open`, `create`, `truncate`, `mkdir`, `unlink`, `rmdir`, `rename`, `symlink`, `link`, `chmod`, and `utimens`. A hard link needs the W-bit on both ends, and `setuid`/`setgid` bits can never be set through the shim.
 - :material-family-tree: **Permission inheritance** -- a grant on a directory applies to all descendants automatically.
+- :material-text-search: **Audited denials** -- every refused operation is logged with the operation, UID, and path.
 - :material-microsoft-windows: **ACL mirroring** -- optionally creates matching NTFS ACL grants via PowerShell/`icacls`.
-- :material-console: **Unified CLI** -- `ugow allow`, `deny`, `check`, `status`, `list` -- works the same across all backends.
+- :material-console: **Unified CLI** -- `ugow allow`, `deny`, `check`, `status`, `list`, `sync`, `acl-cleanup` -- works the same across all backends.
 
 ## Quick Example
 
