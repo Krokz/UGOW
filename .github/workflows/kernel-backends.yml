@@ -196,7 +196,9 @@ jobs:
           status=0
           for tag in $pinned; do
             series=$(series_of "$tag")
-            latest=$(while read -r t; do [[ $(series_of "$t") == "$series" ]] && echo "$t"; done <<<"$upstream" | tail -1)
+            # awk, not a read loop: the step runs under bash -e, and a loop whose
+            # last test fails would end the script silently.
+            latest=$(awk -v s="$series." 'index($0, s) == 1' <<<"$upstream" | tail -1)
             if [[ $latest == "$tag" ]]; then
               echo "$tag is the newest $series tag"
             else
