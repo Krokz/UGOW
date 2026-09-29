@@ -360,3 +360,55 @@ class TestReleaseFlush:
         fh = shim.open("/fl.txt", os.O_RDONLY)
         shim.flush("/fl.txt", fh)
         shim.release("/fl.txt", fh)
+
+
+class TestOwnership:
+    """The shim runs as root; what a caller creates must belong to the caller."""
+
+    @pytest.fixture()
+    def chowns(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr("shim.os.lchown", lambda p, u, g: calls.append((p, u, g)))
+        return calls
+
+    def test_created_file_goes_to_caller(self, shim, store, backing_root, mock_fuse_ctx, chowns):
+        mock_fuse_ctx(UID, gid=2000)
+        store.grant(backing_root, UID)
+        fh = shim.create("/new.txt", 0o644)
+        os.close(fh)
+        assert chowns == [(os.path.join(backing_root, "new.txt"), UID, 2000)]
+
+    def test_existing_file_keeps_its_owner(self, shim, store, backing_root, mock_fuse_ctx, chowns):
+        mock_fuse_ctx(UID)
+        store.grant(backing_root, UID)
+        with open(os.path.join(backing_root, "old.txt"), "w"):
+            pass
+        os.close(shim.create("/old.txt", 0o644))
+        assert chowns == []
+
+    def test_mkdir_and_symlink_go_to_caller(self, shim, store, backing_root, mock_fuse_ctx, chowns):
+        mock_fuse_ctx(UID, gid=2000)
+        store.grant(backing_root, UID)
+        shim.mkdir("/d", 0o755)
+        shim.symlink("/l", "d")
+        assert chowns == [
+            (os.path.join(backing_root, "d"), UID, 2000),
+            (os.path.join(backing_root, "l"), UID, 2000),
+        ]
+
+    def test_root_caller_is_not_remapped(self, shim, store, backing_root, mock_fuse_ctx, chowns, monkeypatch):
+        """Ownership follows the real caller; only W-bit checks use the remap."""
+        monkeypatch.setattr("shim.LAUNCHER_UID", UID)
+        mock_fuse_ctx(0, gid=0)
+        store.grant(backing_root, UID)
+        shim.mkdir("/rootdir", 0o755)
+        assert chowns == [(os.path.join(backing_root, "rootdir"), 0, 0)]
+
+    def test_chown_failure_does_not_fail_the_operation(self, shim, store, backing_root, mock_fuse_ctx, monkeypatch):
+        def refuse(*a):
+            raise PermissionError("no metadata")
+        monkeypatch.setattr("shim.os.lchown", refuse)
+        mock_fuse_ctx(UID)
+        store.grant(backing_root, UID)
+        shim.mkdir("/d", 0o755)
+        assert os.path.isdir(os.path.join(backing_root, "d"))

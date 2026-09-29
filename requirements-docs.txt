@@ -1,0 +1,4 @@
+# Docs site build (mkdocs.yml). MkDocs 2.0 drops the plugin and theme-override
+# systems this site uses, so it stays on 1.x.
+mkdocs==1.6.1
+mkdocs-material==9.7.7

@@ -5,8 +5,8 @@ on:
     branches: [main, dev]
   pull_request:
     branches: [main, dev]
-  # Weekly, so unpinned dependencies or a runner image change that breaks the
-  # suite shows up without a commit to trigger it.
+  # Weekly, so a runner image change that breaks the suite shows up without a
+  # commit to trigger it. Dependency updates arrive as Dependabot PRs.
   schedule:
     - cron: '0 6 * * 1'
   workflow_dispatch:
@@ -34,7 +34,11 @@ jobs:
           pip install -r requirements-dev.txt
 
       - name: Run tests
-        run: pytest tests/ -v
+        # The real-mount tests skip when FUSE or passwordless sudo is missing;
+        # here that must fail instead, or the suite could go quietly empty.
+        env:
+          UGOW_FUSE_TESTS: require
+        run: pytest tests/ -v -rs
 
   docs:
     # docs.yml only builds the site on main, as part of deploying it, so a
@@ -47,7 +51,6 @@ jobs:
         with:
           python-version: '3.12'
 
-      # MkDocs 2.0 drops the plugin and theme-override systems this site uses.
-      - run: pip install 'mkdocs>=1.6,<2' 'mkdocs-material>=9.7,<10'
+      - run: pip install -r requirements-docs.txt
 
       - run: mkdocs build --strict

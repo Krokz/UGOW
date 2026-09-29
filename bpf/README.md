@@ -35,6 +35,8 @@ Key advantage over the FUSE shim: **cannot be bypassed from userspace**.
 Every syscall path to the filesystem passes through the LSM hooks.
 
 **Root (uid 0) is always exempt** from enforcement to prevent system lockout.
+That includes containers: Docker runs a container as root unless it is started
+with `--user`, and such a container can write anywhere on an enforced drive.
 
 ---
 

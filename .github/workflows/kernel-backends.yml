@@ -21,9 +21,11 @@ on:
 permissions:
   contents: read
 
+# Only a pull request's superseded runs are cancelled; on a branch, cancelling
+# would leave an earlier commit with no result.
 concurrency:
   group: kernel-backends-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # An explicit bash shell adds pipefail, so `make | tee` fails when make does.
 defaults:

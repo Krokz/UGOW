@@ -443,26 +443,37 @@ class PermStore:
             time.sleep(0.05)
         return True
 
-    def cleanup_acl(self):
-        """Remove Windows wsl_* users whose UID has zero grants in the DB."""
+    def cleanup_acl(self, dry_run=False):
+        """Remove Windows wsl_* users whose UID has zero grants in the DB.
+
+        Returns (removed, failed): the account names deleted -- or, with
+        *dry_run*, the ones that would be -- and those whose removal failed.
+        Raises AclMirrorUnavailable if the accounts cannot be listed, so a
+        caller never reports a cleanup that did not happen.
+        """
         active_uids = {
             row[0]
             for row in self._conn().execute("SELECT DISTINCT uid FROM wperms")
         }
-        result = subprocess.run(
-            [
-                _find_powershell(), "-Command",
-                "Get-LocalUser | Where-Object { $_.Name -like 'wsl_*' } "
-                "| Select-Object -ExpandProperty Name",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=_ACL_CMD_TIMEOUT,
-        )
+        try:
+            result = subprocess.run(
+                [
+                    _find_powershell(), "-Command",
+                    "Get-LocalUser | Where-Object { $_.Name -like 'wsl_*' } "
+                    "| Select-Object -ExpandProperty Name",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=_ACL_CMD_TIMEOUT,
+            )
+        except (OSError, subprocess.TimeoutExpired) as e:
+            raise AclMirrorUnavailable(f"cannot list Windows accounts: {e}") from e
         if result.returncode != 0:
-            log.error("Failed to list wsl_* users: %s", result.stderr.strip())
-            return
+            raise AclMirrorUnavailable(
+                f"cannot list Windows accounts: {result.stderr.strip()}"
+            )
 
+        stale = []
         for line in result.stdout.strip().splitlines():
             name = line.strip()
             if not name.startswith("wsl_"):
@@ -472,19 +483,34 @@ class PermStore:
             except ValueError:
                 continue
             if uid not in active_uids:
+                stale.append(name)
+        if dry_run:
+            return stale, []
+
+        removed, failed = [], []
+        for name in stale:
+            try:
+                # -ErrorAction Stop: SilentlyContinue would exit 0 on failure.
                 rm = subprocess.run(
                     [
                         _find_powershell(), "-Command",
                         f"Remove-LocalUser -Name '{self._ps_escape(name)}' "
-                        f"-ErrorAction SilentlyContinue",
+                        f"-ErrorAction Stop",
                     ],
                     capture_output=True,
                     text=True,
                     timeout=_ACL_CMD_TIMEOUT,
                 )
-                if rm.returncode == 0:
-                    log.info("Removed stale Windows user: %s", name)
-                else:
-                    log.warning(
-                        "Failed to remove %s: %s", name, rm.stderr.strip()
-                    )
+            except (OSError, subprocess.TimeoutExpired) as e:
+                failed.append(name)
+                log.warning("Failed to remove %s: %s", name, e)
+                continue
+            if rm.returncode == 0:
+                removed.append(name)
+                log.info("Removed stale Windows user: %s", name)
+            else:
+                failed.append(name)
+                log.warning(
+                    "Failed to remove %s: %s", name, rm.stderr.strip()
+                )
+        return removed, failed

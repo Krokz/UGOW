@@ -9,7 +9,7 @@ Usage:
     ugow status <path>           Show who can write to a path
     ugow list                    List all grants
     ugow sync                    Sync SQLite grants into kernel backends
-    ugow acl-cleanup             Drop mirrored Windows users with no grants
+    ugow acl-cleanup [--dry-run] Drop mirrored Windows users with no grants
     ugow mount <drive>           Enable UGOW on a Windows drive
     ugow unmount <drive>         Disable UGOW on a Windows drive
     ugow drives                  List active UGOW-managed drives
@@ -163,6 +163,26 @@ def _bpf_revoke(uid, path):
 
 
 # ---------------------------------------------------------------------------
+# Path resolution
+# ---------------------------------------------------------------------------
+
+def resolve_path(raw):
+    """Return the canonical path a grant for *raw* is stored under.
+
+    Symlinks are resolved because enforcement never sees them: the kernel
+    follows a link before the FUSE shim or an LSM hook is called, so a grant
+    stored under the link's own path would never match. realpath is non-strict,
+    so missing trailing components are kept as typed -- a grant may name a path
+    that does not exist yet.
+    """
+    path = os.path.realpath(raw)
+    typed = os.path.abspath(raw)
+    if path != typed:
+        print(f"  note: {typed} resolves to {path}; using that")
+    return path
+
+
+# ---------------------------------------------------------------------------
 # kmod securityfs helpers
 # ---------------------------------------------------------------------------
 
@@ -186,6 +206,9 @@ def _kmod_key(path):
     expressed the same way, paired with the device so identical relative paths
     on different drives stay distinct.
     """
+    # The kmod renders the dentry the kernel resolved, so the path it is sent
+    # must be resolved too -- including grants stored before paths were.
+    path = os.path.realpath(path)
     st = os.stat(path)
     dev = f"{os.major(st.st_dev)}:{os.minor(st.st_dev)}"
     mount = _mount_point(path)
@@ -276,7 +299,7 @@ def _restore_dac_after_bpf(store, path):
 def cmd_allow(args):
     require_root("allow")
     uid, username = resolve_user(args.user)
-    path = os.path.abspath(args.path)
+    path = resolve_path(args.path)
 
     store = PermStore(db_path=args.db, mirror_acl=args.mirror_acl)
 
@@ -313,13 +336,17 @@ def cmd_allow(args):
 def cmd_deny(args):
     require_root("deny")
     uid, username = resolve_user(args.user)
-    path = os.path.abspath(args.path)
+    path = resolve_path(args.path)
 
     store = PermStore(db_path=args.db, mirror_acl=args.mirror_acl)
 
     # Revoke is the reverse: drop the authoritative record first so a partial
     # failure errs toward denying rather than keeping a stale permission.
     store.revoke(path, uid)
+    # Grants made before paths were resolved are stored as typed.
+    typed = os.path.abspath(args.path)
+    if typed != path:
+        store.revoke(typed, uid)
 
     errors = []
     if _bpf_active():
@@ -348,7 +375,7 @@ def cmd_deny(args):
 
 def cmd_check(args):
     require_root("check")
-    path = os.path.abspath(args.path)
+    path = resolve_path(args.path)
 
     if hasattr(args, "user") and args.user:
         uid, username = resolve_user(args.user)
@@ -368,7 +395,7 @@ def cmd_check(args):
 
 def cmd_status(args):
     require_root("status")
-    path = os.path.abspath(args.path)
+    path = resolve_path(args.path)
     ancestors = set(_path_ancestors(path))
 
     store = PermStore(db_path=args.db, mirror_acl=False)
@@ -451,8 +478,17 @@ def cmd_sync(args):
 def cmd_acl_cleanup(args):
     require_root("acl-cleanup")
     store = PermStore(db_path=args.db, mirror_acl=False)
-    store.cleanup_acl()
-    print("ACL cleanup complete.")
+    removed, failed = store.cleanup_acl(dry_run=args.dry_run)
+
+    verb = "Would remove" if args.dry_run else "Removed"
+    for name in removed:
+        print(f"  {verb}: {name}")
+    for name in failed:
+        print(f"  Failed to remove: {name}", file=sys.stderr)
+    if not removed and not failed:
+        print("No mirrored wsl_* accounts without grants.")
+    if failed:
+        sys.exit(1)
 
 
 def cmd_list(args):
@@ -536,11 +572,22 @@ def cmd_mount(args):
                   file=sys.stderr)
             sys.exit(1)
         result = _run([UGOW_PYTHON, UGOW_MANAGE, "add-device", mount_path])
-        if result.returncode == 0:
-            print(f"\nDrive {letter.upper()}: is now enforced by UGOW BPF at {mount_path}")
-        else:
+        if result.returncode != 0:
             print(f"Error: {result.stderr.strip()}", file=sys.stderr)
             sys.exit(result.returncode)
+
+        # BPF grants are keyed by inode, and a Windows drive's inode numbers
+        # can change across a remount, so reload the map from SQLite now that
+        # the drive is enforced -- stale keys would match nothing and deny.
+        result = _run([UGOW_PYTHON, UGOW_MANAGE, "--db", args.db, "sync"])
+        if result.returncode != 0:
+            err = (result.stderr or result.stdout or "").strip()
+            print(f"Error: drive {letter.upper()}: is enforced, but reloading "
+                  f"its grants failed: {err}\n"
+                  f"  Grants on it may be refused until 'sudo ugow sync' succeeds.",
+                  file=sys.stderr)
+            sys.exit(result.returncode)
+        print(f"\nDrive {letter.upper()}: is now enforced by UGOW BPF at {mount_path}")
 
 
 def cmd_unmount(args):
@@ -676,8 +723,10 @@ def main():
 
     sub.add_parser("list", help="List all grants")
     sub.add_parser("sync", help="Replay SQLite grants into kernel backends (kmod/BPF)")
-    sub.add_parser("acl-cleanup",
-                   help="Remove mirrored Windows wsl_* users with no grants")
+    p = sub.add_parser("acl-cleanup",
+                       help="Remove mirrored Windows wsl_* users with no grants")
+    p.add_argument("--dry-run", action="store_true",
+                   help="List the accounts that would be removed, removing nothing")
 
     p = sub.add_parser("mount", help="Enable UGOW on a Windows drive")
     p.add_argument("drive", help="Drive letter (e.g. d, e, f)")

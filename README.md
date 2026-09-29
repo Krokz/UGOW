@@ -13,7 +13,7 @@
 
 **U**nix **G**rant **O**verlay for **W**indows drives in WSL2.
 
-UGOW adds fine-grained, per-user write control to Windows drives mounted in WSL2. Write operations on `/mnt/c`, `/mnt/d`, etc. are gated by a SQLite-backed permission store and optionally mirrored to NTFS ACLs on the Windows host.
+UGOW adds fine-grained, per-user write control to Windows drives mounted in WSL2. Write operations on `/mnt/c`, `/mnt/d`, etc. are gated by a SQLite-backed permission store.
 
 ---
 
@@ -37,7 +37,7 @@ I couldn't find a clean solution, so I built one.
 - **Permission inheritance** -- a grant on a directory applies to all descendants.
 - **Root exemption** (BPF mode) -- root is always allowed through. In FUSE mode, root is remapped to the user who launched the shim, inheriting their W-bit rights. The kmod makes this a build-time choice (`CONFIG_SECURITY_UGOW_ROOT_EXEMPT`, default `y`).
 - **Audited denials** -- every refused operation is logged with the operation, UID, and mount-visible path (`journalctl -u wsl-fuse-shim@c.service`).
-- **ACL mirroring** -- best-effort creation of corresponding Windows local users (`wsl_<UID>`) and NTFS ACL grants via PowerShell/`icacls`.
+- **ACL mirroring (visibility only)** -- optionally records each grant on the Windows side as an NTFS ACE for a disabled local account `wsl_<UID>`, so it shows up in the folder's Security tab. It enforces nothing: WSL reaches NTFS as the Windows user who launched it, whatever the Linux UID, so an ACE for `wsl_<UID>` never changes what WSL can do.
 - **Unified CLI** -- `ugow allow`, `ugow deny`, `ugow check`, `ugow status`, `ugow list`, `ugow sync`, `ugow acl-cleanup` -- works identically across all backends.
 
 ---
@@ -148,7 +148,8 @@ sudo ugow check --user 9500 /mnt/c/data  # can UID 9500 write here?
 sudo ugow status /mnt/c/docker           # who can write here?
 sudo ugow list                           # show all grants
 sudo ugow sync                           # replay SQLite into kernel backends
-sudo ugow acl-cleanup                    # drop mirrored wsl_* users with no grants
+sudo ugow acl-cleanup --dry-run          # list mirrored wsl_* users with no grants
+sudo ugow acl-cleanup                    # ...and remove them
 ```
 
 Users can be specified by name or numeric UID. All commands require root (`sudo`). The `check` command uses `SUDO_UID` to test the *calling* user's permissions, not root's.
@@ -187,6 +188,16 @@ docker run --user 9500 \
 ```
 
 The container (UID 9500) will be able to write under `/data` only if you granted its W-bit.
+
+> **Containers running as root.** Docker runs a container as root unless you
+> pass `--user`, and each backend treats root differently:
+>
+> - **BPF** exempts root unconditionally, so a root container can write
+>   anywhere on an enforced drive. Always pass `--user`.
+> - **FUSE** remaps root to the user who launched the shim, so a root container
+>   gets that user's grants.
+> - **kmod** exempts root unless the kernel was built with
+>   `CONFIG_SECURITY_UGOW_ROOT_EXEMPT=n`.
 
 ---
 

@@ -319,8 +319,8 @@ if [[ "$MODE" == "fuse" ]]; then
     fi
   fi
 
-  # Install fusepy into the venv
-  sudo "$VE/venv/bin/pip" install --upgrade --quiet fusepy
+  # Install fusepy into the venv, at the version CI tests against
+  sudo "$VE/venv/bin/pip" install --quiet -r "$SCRIPT_DIR/requirements.txt"
 
   # Install shim + permstore + helper scripts for the FUSE daemon
   if [ -e "$SHIM_BIN" ] && ! grep -q '# Shim: UGOW' "$SHIM_BIN"; then

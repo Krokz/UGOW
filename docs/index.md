@@ -41,7 +41,7 @@ I couldn't find a clean solution, so I built one.
 - :material-file-lock: **W-bit enforcement** -- gates `access`, `open`, `create`, `truncate`, `mkdir`, `unlink`, `rmdir`, `rename`, `symlink`, `link`, `chmod`, and `utimens`. A hard link needs the W-bit on both ends, and `setuid`/`setgid` bits can never be set through the shim.
 - :material-family-tree: **Permission inheritance** -- a grant on a directory applies to all descendants automatically.
 - :material-text-search: **Audited denials** -- every refused operation is logged with the operation, UID, and path.
-- :material-microsoft-windows: **ACL mirroring** -- optionally creates matching NTFS ACL grants via PowerShell/`icacls`.
+- :material-microsoft-windows: **ACL mirroring (visibility only)** -- optionally records grants as NTFS ACEs so they show in the Windows Security tab. It enforces nothing: WSL reaches NTFS as the Windows user who launched it, whatever the Linux UID, so an ACE for `wsl_<UID>` never changes what WSL can do.
 - :material-console: **Unified CLI** -- `ugow allow`, `deny`, `check`, `status`, `list`, `sync`, `acl-cleanup` -- works the same across all backends.
 
 ## Quick Example
