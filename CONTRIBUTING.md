@@ -15,6 +15,21 @@ Thanks for your interest in contributing! Here's how to get started.
    pytest
    ```
 
+## Testing on WSL2
+
+`pytest` covers the Python code with the kernel mocked out. To check a real
+install, run this on a WSL2 machine after `setup.sh` (or after booting a kernel
+built with the kmod):
+
+```bash
+sudo ./ugow-verify.sh
+```
+
+It tests every gated operation against whichever backend is active, as an
+unprivileged uid that holds a grant on one directory and not another.
+`sudo ./ugow-verify.sh persist-setup`, a `wsl --shutdown`, then
+`sudo ./ugow-verify.sh persist-check` confirm that grants survive a restart.
+
 ## Submitting Changes
 
 1. Create a branch for your work (`git checkout -b my-change`).
