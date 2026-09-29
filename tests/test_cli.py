@@ -409,6 +409,63 @@ class TestMissingHelperBinary:
         assert "bpftool" in err
 
 
+class TestBpfMountResync:
+    """`ugow mount` in BPF mode must reload inode-keyed grants for the drive."""
+
+    @pytest.fixture()
+    def calls(self, monkeypatch):
+        import subprocess as sp
+
+        class Calls(list):
+            rcs = {}   # ugow_manage subcommand -> return code
+
+        record = Calls()
+
+        def run(cmd):
+            record.append(cmd)
+            sub = "sync" if cmd[-1] == "sync" else cmd[-2]
+            rc = record.rcs.get(sub, 0)
+            return sp.CompletedProcess(cmd, rc, "", "boom" if rc else "")
+
+        monkeypatch.setattr("os.getuid", lambda: 0)
+        monkeypatch.setattr("cli._detect_mode", lambda: "bpf")
+        monkeypatch.setattr("cli.os.path.isdir", lambda p: True)
+        monkeypatch.setattr("cli._run", run)
+        record.rcs = {}
+        return record
+
+    @staticmethod
+    def _args():
+        return types.SimpleNamespace(drive="d", db="/tmp/ugow-test.db")
+
+    def test_registers_then_syncs(self, calls, capsys):
+        from cli import cmd_mount, UGOW_MANAGE
+
+        cmd_mount(self._args())
+        assert [c[1:] for c in calls] == [
+            [UGOW_MANAGE, "add-device", "/mnt/d"],
+            [UGOW_MANAGE, "--db", "/tmp/ugow-test.db", "sync"],
+        ]
+        assert "now enforced" in capsys.readouterr().out
+
+    def test_sync_failure_exits_nonzero(self, calls, capsys):
+        from cli import cmd_mount
+
+        calls.rcs["sync"] = 1
+        with pytest.raises(SystemExit) as exc:
+            cmd_mount(self._args())
+        assert exc.value.code == 1
+        assert "reloading its grants failed" in capsys.readouterr().err
+
+    def test_failed_registration_does_not_sync(self, calls):
+        from cli import cmd_mount
+
+        calls.rcs["add-device"] = 1
+        with pytest.raises(SystemExit):
+            cmd_mount(self._args())
+        assert len(calls) == 1
+
+
 class TestAclCleanup:
     @pytest.fixture()
     def args(self, tmp_path):

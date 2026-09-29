@@ -152,7 +152,7 @@ sudo ugow mount <drive>
 |----------|-------------|
 | `drive` | Drive letter (e.g. `d`, `e`, `f`) |
 
-In FUSE mode, this starts a systemd unit for the drive. In BPF mode, this registers the device in the BPF target map and records the drive letter in `/var/lib/ugow/drives`, so it is re-registered at the next boot -- device numbers are reassigned on every WSL restart, and a drive left out would come back unenforced.
+In FUSE mode, this starts a systemd unit for the drive. In BPF mode, this registers the device in the BPF target map and records the drive letter in `/var/lib/ugow/drives`, so it is re-registered at the next boot -- device numbers are reassigned on every WSL restart, and a drive left out would come back unenforced. It then reloads the BPF grant map from SQLite, like `ugow sync`: grants are keyed by inode, which can change when a drive is remounted. If that reload fails, the command exits non-zero -- the drive is enforced, but its grants may be refused until `ugow sync` succeeds.
 
 ```bash
 sudo ugow mount d

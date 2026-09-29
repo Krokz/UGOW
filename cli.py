@@ -545,11 +545,22 @@ def cmd_mount(args):
                   file=sys.stderr)
             sys.exit(1)
         result = _run([UGOW_PYTHON, UGOW_MANAGE, "add-device", mount_path])
-        if result.returncode == 0:
-            print(f"\nDrive {letter.upper()}: is now enforced by UGOW BPF at {mount_path}")
-        else:
+        if result.returncode != 0:
             print(f"Error: {result.stderr.strip()}", file=sys.stderr)
             sys.exit(result.returncode)
+
+        # BPF grants are keyed by inode, and a Windows drive's inode numbers
+        # can change across a remount, so reload the map from SQLite now that
+        # the drive is enforced -- stale keys would match nothing and deny.
+        result = _run([UGOW_PYTHON, UGOW_MANAGE, "--db", args.db, "sync"])
+        if result.returncode != 0:
+            err = (result.stderr or result.stdout or "").strip()
+            print(f"Error: drive {letter.upper()}: is enforced, but reloading "
+                  f"its grants failed: {err}\n"
+                  f"  Grants on it may be refused until 'sudo ugow sync' succeeds.",
+                  file=sys.stderr)
+            sys.exit(result.returncode)
+        print(f"\nDrive {letter.upper()}: is now enforced by UGOW BPF at {mount_path}")
 
 
 def cmd_unmount(args):
