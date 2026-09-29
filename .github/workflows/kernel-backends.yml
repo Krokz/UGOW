@@ -77,10 +77,11 @@ jobs:
         run: make -C bpf CLANG="clang -Werror"
 
       - name: Load through the verifier (runner kernel)
-        # Informational until it has been seen to pass: the runner's kernel is
-        # not a WSL kernel, and loading does not attach anything.
-        continue-on-error: true
+        # The runner's kernel is not a WSL kernel, and loading attaches
+        # nothing, but it is the one place short of WSL2 where the verifier
+        # sees these programs -- including the bpf_get_func_arg() calls.
         run: |
+          uname -r
           sudo bpftool prog loadall bpf/ugow.bpf.o /sys/fs/bpf/ugow-ci type lsm
           sudo ls /sys/fs/bpf/ugow-ci
           sudo rm -rf /sys/fs/bpf/ugow-ci
