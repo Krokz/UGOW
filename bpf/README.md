@@ -175,6 +175,14 @@ sudo python3 ugow_manage.py unload                # detach and unpin
   the destination's parent *and* on the existing file, so a link created inside
   a granted directory cannot expose a protected file through its second name.
 
+- **One object for 6.6 and 6.18 kernels** -- Linux 6.9 added a leading
+  `struct mnt_idmap *` to `inode_setattr`, so WSL's 6.6 and 6.18 kernels pass
+  it different arguments. The program reads `dentry` and `attr` as the last
+  two arguments via `bpf_get_func_arg()` instead of by fixed position; a
+  hard-coded prototype would read the wrong slots on one of them and let
+  `chmod`/`chown`/`truncate` through. CI checks every hook's prototype against
+  both kernel series.
+
 - **Shared database** -- grants live in the same SQLite DB as the FUSE shim
   (`/var/lib/ugow/wperm.db`), so you can switch between enforcement layers
   without re-creating grants.

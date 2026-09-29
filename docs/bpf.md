@@ -125,6 +125,10 @@ The rename hook checks both the source and destination directories against `targ
 
 `inode_link` requires the W-bit on the destination's parent *and* on the existing file. Without the second check, linking a protected file into a granted directory would make it writable through its new name, since the ancestor walk starts from whichever path is used.
 
+### One object for 6.6 and 6.18 kernels
+
+Linux 6.9 added a leading `struct mnt_idmap *` to the `inode_setattr` hook, so WSL's 6.6 and 6.18 kernels pass it different arguments. `BPF_PROG()` binds arguments by position, and a hard-coded prototype would read the wrong slots on one series and let `chmod`, `chown` and `truncate` through. The program instead fetches `dentry` and `attr` -- the last two arguments on both -- with `bpf_get_func_arg()`, so the same object works on either. CI checks every hook's prototype against both kernel series.
+
 ### Shared database
 
 Grants live in the same SQLite DB as the FUSE shim (`/var/lib/ugow/wperm.db`), so you can switch between enforcement layers without re-creating grants.

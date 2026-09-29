@@ -80,6 +80,17 @@ struct {
 /* ------------------------------------------------------------------ */
 
 /*
+ * Declared here rather than taken from <bpf/bpf_helper_defs.h>: libbpf only
+ * added these in 0.7, and setup.sh builds against whatever libbpf-dev the
+ * distro ships (Ubuntu 22.04 has 0.5).  The IDs are UAPI and come from the
+ * kernel's own BTF via vmlinux.h.
+ */
+static long (* const ugow_get_func_arg)(void *ctx, __u32 n, __u64 *value) =
+	(void *)BPF_FUNC_get_func_arg;
+static __u64 (* const ugow_get_func_arg_cnt)(void *ctx) =
+	(void *)BPF_FUNC_get_func_arg_cnt;
+
+/*
  * Check whether the device backing this inode is one we enforce on.
  */
 static __always_inline bool is_target_dev_num(__u32 dev)
@@ -209,10 +220,33 @@ int BPF_PROG(ugow_inode_permission, struct inode *inode, int mask)
  * Metadata writes: chmod, chown, truncate and utimensat all arrive here.
  * Without this hook an unprivileged caller could re-mode any file on an
  * enforced drive, which is a write in every sense that matters.
+ *
+ * Linux 6.9 prepended a struct mnt_idmap * to this hook, so WSL's 6.6 kernels
+ * pass (dentry, attr) and its 6.18 kernels (idmap, dentry, attr).  BPF_PROG()
+ * binds arguments by position, and with either fixed prototype the other
+ * kernel would read the wrong slots and fail open.  dentry and attr are the
+ * last two arguments on both, so fetch them relative to the argument count
+ * the trampoline records.  Indexing ctx directly would not work: the verifier
+ * rejects any ctx access past the hook's arity, even in an untaken branch.
  */
 SEC("lsm/inode_setattr")
-int BPF_PROG(ugow_inode_setattr, struct dentry *dentry, struct iattr *attr)
+int ugow_inode_setattr(unsigned long long *ctx)
 {
+	__u64 nr_args = ugow_get_func_arg_cnt(ctx);
+	__u64 dentry_arg = 0, attr_arg = 0;
+
+	/*
+	 * Cannot fail: the hook has had at least two arguments on every
+	 * kernel.  Allow rather than deny if it somehow does -- this runs
+	 * before the device filter, so a denial would break chmod everywhere.
+	 */
+	if (ugow_get_func_arg(ctx, nr_args - 2, &dentry_arg) ||
+	    ugow_get_func_arg(ctx, nr_args - 1, &attr_arg))
+		return 0;
+
+	struct dentry *dentry = (struct dentry *)dentry_arg;
+	struct iattr *attr = (struct iattr *)attr_arg;
+
 	if (!(BPF_CORE_READ(attr, ia_valid) & UGOW_GATED_ATTRS))
 		return 0;
 	if (!is_target_dentry(dentry))
