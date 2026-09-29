@@ -1,0 +1,164 @@
+name: Kernel backends
+
+# Compile-only checks for the BPF and kmod backends. Nothing here loads a
+# program into or boots a WSL2 kernel, so this does not replace testing on
+# WSL2 -- it catches API and prototype drift against real WSL kernel trees.
+
+on:
+  push:
+    branches: [main, dev]
+    paths:
+      - 'bpf/**'
+      - 'kmod/**'
+      - '.github/scripts/check_lsm_hooks.py'
+      - '.github/workflows/kernel-backends.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'bpf/**'
+      - 'kmod/**'
+      - '.github/scripts/check_lsm_hooks.py'
+      - '.github/workflows/kernel-backends.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kernel-backends-${{ github.ref }}
+  cancel-in-progress: true
+
+# An explicit bash shell adds pipefail, so `make | tee` fails when make does.
+defaults:
+  run:
+    shell: bash
+
+env:
+  # 6.6 is the series kmod/README.md builds against; 6.18 is the newest
+  # series WSL ships, which the BPF backend runs on unmodified.
+  WSL_KERNELS: linux-msft-wsl-6.6.123.2 linux-msft-wsl-6.18.40.1
+  BPFTOOL_VERSION: v7.7.0
+
+jobs:
+  bpf:
+    name: BPF (${{ matrix.os }})
+    # setup.sh builds against the distro's libbpf-dev: 22.04 ships 0.5, which
+    # lacks the bpf_get_func_arg declarations (ugow.bpf.c declares its own),
+    # and 24.04 ships 1.3.
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y clang llvm libbpf-dev
+          # Ubuntu's bpftool is tied to the running kernel's linux-tools
+          # package; the upstream static build is not.
+          cd "$RUNNER_TEMP"
+          tarball="bpftool-${BPFTOOL_VERSION}-amd64.tar.gz"
+          base="https://github.com/libbpf/bpftool/releases/download/${BPFTOOL_VERSION}"
+          curl -fsSLO "$base/$tarball"
+          curl -fsSLO "$base/$tarball.sha256sum"
+          sha256sum -c "$tarball.sha256sum"
+          tar xzf "$tarball"
+          sudo install -m 755 bpftool /usr/local/bin/bpftool
+          bpftool version
+
+      # vmlinux.h comes from the runner's kernel BTF. Every field the program
+      # reads through CO-RE exists in 6.6 and later, so this is sufficient to
+      # compile; the prototype check below is what ties it to WSL kernels.
+      - name: Build ugow.bpf.o
+        run: make -C bpf CLANG="clang -Werror"
+
+      - name: Load through the verifier (runner kernel)
+        # Informational until it has been seen to pass: the runner's kernel is
+        # not a WSL kernel, and loading does not attach anything.
+        continue-on-error: true
+        run: |
+          sudo bpftool prog loadall bpf/ugow.bpf.o /sys/fs/bpf/ugow-ci type lsm
+          sudo ls /sys/fs/bpf/ugow-ci
+          sudo rm -rf /sys/fs/bpf/ugow-ci
+
+      - name: Check hook prototypes against WSL kernels
+        if: ${{ !cancelled() }}
+        run: |
+          status=0
+          for tag in $WSL_KERNELS; do
+            defs="$RUNNER_TEMP/$tag-lsm_hook_defs.h"
+            curl -fsSL -o "$defs" \
+              "https://raw.githubusercontent.com/microsoft/WSL2-Linux-Kernel/$tag/include/linux/lsm_hook_defs.h"
+            python3 .github/scripts/check_lsm_hooks.py "$defs" bpf/ugow.bpf.c "$tag" || status=1
+          done
+          exit $status
+
+  kmod:
+    name: kmod (${{ matrix.kernel }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    # The kmod is documented against 6.6 only; 6.18 is tracked, not required.
+    continue-on-error: ${{ matrix.experimental }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - kernel: linux-msft-wsl-6.6.123.2
+            experimental: false
+          - kernel: linux-msft-wsl-6.18.40.1
+            experimental: true
+    env:
+      KSRC: ${{ github.workspace }}/../linux
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y build-essential flex bison bc libelf-dev libssl-dev
+
+      - name: Fetch ${{ matrix.kernel }}
+        run: |
+          mkdir -p "$KSRC"
+          curl -fsSL "https://github.com/microsoft/WSL2-Linux-Kernel/archive/refs/tags/${{ matrix.kernel }}.tar.gz" \
+            | tar xz --strip-components=1 -C "$KSRC"
+
+      # The same steps kmod/README.md gives, so this also checks the docs.
+      - name: Wire UGOW into the tree
+        run: |
+          cp -r kmod "$KSRC/security/ugow"
+          cd "$KSRC"
+          # shellcheck disable=SC2016 # $(CONFIG_...) is make syntax, not shell
+          printf '%s\n' 'subdir-$(CONFIG_SECURITY_UGOW) += ugow' \
+                        'obj-$(CONFIG_SECURITY_UGOW) += ugow/' >> security/Makefile
+          echo 'source "security/ugow/Kconfig"' >> security/Kconfig
+          cp Microsoft/config-wsl .config
+          scripts/config --enable CONFIG_SECURITY_UGOW
+          scripts/config --set-str CONFIG_LSM "landlock,lockdown,yama,loadpin,safesetid,integrity,apparmor,bpf,ugow"
+          make olddefconfig
+          # olddefconfig silently drops an option whose dependencies are unmet,
+          # which would leave nothing to compile and the job green.
+          grep -qx 'CONFIG_SECURITY_UGOW=y' .config
+          grep -qx 'CONFIG_SECURITY_UGOW_ROOT_EXEMPT=y' .config
+
+      - name: Build ugow_lsm.o
+        run: |
+          cd "$KSRC"
+          make -j"$(nproc)" security/ugow/ugow_lsm.o 2>&1 | tee "$RUNNER_TEMP/build.log"
+          test -s security/ugow/ugow_lsm.o
+          # The rest of the tree is not ours to keep warning-free.
+          if grep -E '^security/ugow/.*(warning|error):' "$RUNNER_TEMP/build.log"; then
+            echo "::error::ugow_lsm.c builds with warnings"
+            exit 1
+          fi
+
+      - name: checkpatch
+        # Style only; reported, not enforced.
+        continue-on-error: true
+        run: |
+          cd "$KSRC"
+          scripts/checkpatch.pl --no-tree --terse -f security/ugow/ugow_lsm.c
