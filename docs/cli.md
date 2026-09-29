@@ -29,14 +29,14 @@ The grant is pushed to every active kernel backend *before* it is committed to S
 
 In BPF mode, `allow` also widens the path's Unix mode if it would block writes at the DAC layer before the LSM hooks run, recording the original mode so `deny` can put it back.
 
-??? info "ACL mirroring"
-    Pass `--mirror-acl` to also create a corresponding NTFS ACL grant on the Windows side via PowerShell. Requires an elevated (Administrator) Windows Terminal session.
+??? info "ACL mirroring (visibility only)"
+    Pass `--mirror-acl`, before the subcommand, to also record the grant on the Windows side. Requires an elevated (Administrator) Windows Terminal session.
 
     ```bash
-    sudo ugow allow --mirror-acl ubuntu /mnt/c/docker
+    sudo ugow --mirror-acl allow ubuntu /mnt/c/docker
     ```
 
-    This creates a Windows local user `wsl_<UID>` and grants it full control on the Windows path via `icacls`.
+    This creates a disabled Windows local user `wsl_<UID>` and grants it full control on the Windows path via `icacls`, so the grant shows up in the folder's Security tab. It does not enforce anything: WSL reaches NTFS as the Windows user who launched it, whatever the Linux UID, so an ACE for `wsl_<UID>` never changes what WSL can do. Enforcement comes only from the UGOW backend.
 
 ---
 
@@ -132,10 +132,11 @@ If no kernel backend is active the command reports that there is nothing to sync
 Remove mirrored Windows `wsl_<UID>` users that no longer hold any grant.
 
 ```bash
+sudo ugow acl-cleanup --dry-run   # list what would be removed
 sudo ugow acl-cleanup
 ```
 
-ACL mirroring creates a Windows local user per granted UID. Revoking the last grant for a UID drops its NTFS ACEs but leaves the account behind; this command lists the host's `wsl_*` users and deletes the ones whose UID has zero grants in the store. It has no effect if you have never used `--mirror-acl`.
+ACL mirroring creates a Windows local user per granted UID. Revoking the last grant for a UID drops its NTFS ACEs but leaves the account behind; this command lists the host's `wsl_*` users and deletes the ones whose UID has zero grants in the store. It prints each account it removed, or would remove with `--dry-run`, and exits non-zero if any removal failed or the accounts could not be listed. Removing accounts needs an elevated Windows session. It has no effect if you have never used `--mirror-acl`.
 
 ---
 
@@ -193,9 +194,9 @@ Shows active FUSE units or BPF-registered devices, depending on the installed mo
 
 ## Hidden Flags
 
-These flags are available but hidden from `--help`:
+These flags are available but hidden from `--help`. They belong to `ugow` itself, so they go before the subcommand:
 
 | Flag | Description |
 |------|-------------|
 | `--db <path>` | Override the SQLite database path (default: `/var/lib/ugow/wperm.db`) |
-| `--mirror-acl` | Enable NTFS ACL mirroring on `allow`/`deny` operations |
+| `--mirror-acl` | Mirror `allow`/`deny` into NTFS ACLs for visibility; enforces nothing. Goes before the subcommand: `ugow --mirror-acl allow ...` |

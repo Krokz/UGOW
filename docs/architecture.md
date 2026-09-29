@@ -140,6 +140,8 @@ SQLite connections are per-thread (stored in `threading.local()`). WAL mode is e
 
 ### ACL mirroring
 
+ACL mirroring is a visibility aid, not an enforcement layer. WSL reaches NTFS as the Windows user who launched it, whatever the Linux UID, so an ACE for `wsl_<UID>` never changes what WSL can do. The mirrored ACEs only show the grant in a folder's Windows Security tab.
+
 When enabled (`--mirror-acl`), grant and revoke operations are queued to a background worker thread that:
 
 1. Creates a Windows local user `wsl_<UID>` if it doesn't exist, with a random password, and immediately disables it -- the account exists only as an ACL principal, nothing ever authenticates as it, and a disabled account's SID still resolves in ACLs
@@ -150,7 +152,7 @@ Grants are applied inheritably (`(OI)(CI)F`) and recursively (`/T`). Revoke uses
 
 Requesting `--mirror-acl` without Windows Administrator privileges raises `AclMirrorUnavailable`, which the CLI turns into an error message. The library never calls `sys.exit()` on its caller's behalf -- the FUSE daemon imports the same module and would otherwise die at startup with no explanation. Flushing pending ACL work is bounded (60 s) and returns a success flag rather than blocking forever if the worker thread has died.
 
-ACL mirroring is best-effort -- if it fails, the SQLite grant still succeeds and the W-bit enforcement layer works independently. `ugow acl-cleanup` removes mirrored `wsl_*` accounts whose UID no longer holds any grant.
+ACL mirroring is best-effort -- if it fails, the SQLite grant still succeeds and the W-bit enforcement layer works independently. `ugow acl-cleanup` removes mirrored `wsl_*` accounts whose UID no longer holds any grant; `--dry-run` lists them without removing anything.
 
 ### Path conversion
 

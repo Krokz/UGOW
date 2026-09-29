@@ -1,4 +1,5 @@
 import os
+import subprocess
 import time
 import threading
 import pytest
@@ -194,3 +195,65 @@ class TestConcurrency:
         assert errors == [], f"Errors during concurrent grants: {errors}"
         grants = store.list_grants()
         assert len(grants) == 400
+
+
+class TestCleanupAcl:
+    """acl-cleanup must report what it did, never a cleanup that did not happen."""
+
+    @staticmethod
+    def _fake_powershell(monkeypatch, listing, remove_rc=0, calls=None):
+        def run(cmd, **kwargs):
+            script = cmd[-1]
+            if calls is not None:
+                calls.append(script)
+            if script.startswith("Get-LocalUser"):
+                return subprocess.CompletedProcess(cmd, 0, listing, "")
+            return subprocess.CompletedProcess(cmd, remove_rc, "", "denied")
+        monkeypatch.setattr(permstore_mod.subprocess, "run", run)
+
+    def test_removes_only_accounts_without_grants(self, store, monkeypatch):
+        store.grant("/mnt/c/keep", 1000)
+        calls = []
+        self._fake_powershell(
+            monkeypatch, "wsl_1000\nwsl_2000\nwsl_bogus\nAdministrator\n", calls=calls
+        )
+        removed, failed = store.cleanup_acl()
+        assert removed == ["wsl_2000"]
+        assert failed == []
+        assert any("Remove-LocalUser -Name 'wsl_2000'" in c for c in calls)
+        assert not any("'wsl_1000'" in c for c in calls if c.startswith("Remove"))
+
+    def test_dry_run_removes_nothing(self, store, monkeypatch):
+        calls = []
+        self._fake_powershell(monkeypatch, "wsl_2000\n", calls=calls)
+        removed, failed = store.cleanup_acl(dry_run=True)
+        assert removed == ["wsl_2000"]
+        assert failed == []
+        assert not any(c.startswith("Remove-LocalUser") for c in calls)
+
+    def test_failed_removal_is_reported(self, store, monkeypatch):
+        self._fake_powershell(monkeypatch, "wsl_2000\n", remove_rc=1)
+        removed, failed = store.cleanup_acl()
+        assert removed == []
+        assert failed == ["wsl_2000"]
+
+    def test_removal_errors_are_not_silenced(self, store, monkeypatch):
+        calls = []
+        self._fake_powershell(monkeypatch, "wsl_2000\n", calls=calls)
+        store.cleanup_acl()
+        removal = [c for c in calls if c.startswith("Remove-LocalUser")][0]
+        assert "-ErrorAction Stop" in removal
+
+    def test_missing_powershell_raises_instead_of_tracebacking(self, store, monkeypatch):
+        def run(cmd, **kwargs):
+            raise FileNotFoundError(cmd[0])
+        monkeypatch.setattr(permstore_mod.subprocess, "run", run)
+        with pytest.raises(permstore_mod.AclMirrorUnavailable):
+            store.cleanup_acl()
+
+    def test_listing_failure_raises(self, store, monkeypatch):
+        def run(cmd, **kwargs):
+            return subprocess.CompletedProcess(cmd, 1, "", "access denied")
+        monkeypatch.setattr(permstore_mod.subprocess, "run", run)
+        with pytest.raises(permstore_mod.AclMirrorUnavailable, match="access denied"):
+            store.cleanup_acl()

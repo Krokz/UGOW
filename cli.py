@@ -9,7 +9,7 @@ Usage:
     ugow status <path>           Show who can write to a path
     ugow list                    List all grants
     ugow sync                    Sync SQLite grants into kernel backends
-    ugow acl-cleanup             Drop mirrored Windows users with no grants
+    ugow acl-cleanup [--dry-run] Drop mirrored Windows users with no grants
     ugow mount <drive>           Enable UGOW on a Windows drive
     ugow unmount <drive>         Disable UGOW on a Windows drive
     ugow drives                  List active UGOW-managed drives
@@ -451,8 +451,17 @@ def cmd_sync(args):
 def cmd_acl_cleanup(args):
     require_root("acl-cleanup")
     store = PermStore(db_path=args.db, mirror_acl=False)
-    store.cleanup_acl()
-    print("ACL cleanup complete.")
+    removed, failed = store.cleanup_acl(dry_run=args.dry_run)
+
+    verb = "Would remove" if args.dry_run else "Removed"
+    for name in removed:
+        print(f"  {verb}: {name}")
+    for name in failed:
+        print(f"  Failed to remove: {name}", file=sys.stderr)
+    if not removed and not failed:
+        print("No mirrored wsl_* accounts without grants.")
+    if failed:
+        sys.exit(1)
 
 
 def cmd_list(args):
@@ -676,8 +685,10 @@ def main():
 
     sub.add_parser("list", help="List all grants")
     sub.add_parser("sync", help="Replay SQLite grants into kernel backends (kmod/BPF)")
-    sub.add_parser("acl-cleanup",
-                   help="Remove mirrored Windows wsl_* users with no grants")
+    p = sub.add_parser("acl-cleanup",
+                       help="Remove mirrored Windows wsl_* users with no grants")
+    p.add_argument("--dry-run", action="store_true",
+                   help="List the accounts that would be removed, removing nothing")
 
     p = sub.add_parser("mount", help="Enable UGOW on a Windows drive")
     p.add_argument("drive", help="Drive letter (e.g. d, e, f)")

@@ -409,6 +409,60 @@ class TestMissingHelperBinary:
         assert "bpftool" in err
 
 
+class TestAclCleanup:
+    @pytest.fixture()
+    def args(self, tmp_path):
+        def _make(dry_run=False):
+            return types.SimpleNamespace(db=str(tmp_path / "acl.db"), dry_run=dry_run)
+        return _make
+
+    @pytest.fixture(autouse=True)
+    def as_root(self, monkeypatch):
+        monkeypatch.setattr("os.getuid", lambda: 0)
+
+    def test_dry_run_lists_without_removing(self, monkeypatch, args, capsys):
+        from cli import cmd_acl_cleanup
+
+        seen = {}
+
+        def cleanup(self, dry_run=False):
+            seen["dry_run"] = dry_run
+            return ["wsl_2000"], []
+
+        monkeypatch.setattr(PermStore, "cleanup_acl", cleanup)
+        cmd_acl_cleanup(args(dry_run=True))
+        assert seen["dry_run"] is True
+        assert "Would remove: wsl_2000" in capsys.readouterr().out
+
+    def test_failed_removal_exits_nonzero(self, monkeypatch, args, capsys):
+        from cli import cmd_acl_cleanup
+
+        monkeypatch.setattr(PermStore, "cleanup_acl",
+                            lambda self, dry_run=False: (["wsl_1"], ["wsl_2"]))
+        with pytest.raises(SystemExit) as exc:
+            cmd_acl_cleanup(args())
+        assert exc.value.code == 1
+        out = capsys.readouterr()
+        assert "Removed: wsl_1" in out.out
+        assert "Failed to remove: wsl_2" in out.err
+
+    def test_nothing_to_do_says_so(self, monkeypatch, args, capsys):
+        from cli import cmd_acl_cleanup
+
+        monkeypatch.setattr(PermStore, "cleanup_acl", lambda self, dry_run=False: ([], []))
+        cmd_acl_cleanup(args())
+        assert "No mirrored wsl_* accounts" in capsys.readouterr().out
+
+    def test_dry_run_flag_parses_after_the_subcommand(self, monkeypatch):
+        from cli import main
+
+        seen = {}
+        monkeypatch.setattr("cli.cmd_acl_cleanup", lambda a: seen.setdefault("args", a))
+        monkeypatch.setattr("sys.argv", ["ugow", "acl-cleanup", "--dry-run"])
+        main()
+        assert seen["args"].dry_run is True
+
+
 # ---------------------------------------------------------------------------
 # main() arg dispatch
 # ---------------------------------------------------------------------------
