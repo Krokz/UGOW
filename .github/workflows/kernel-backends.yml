@@ -1,0 +1,213 @@
+name: Kernel backends
+
+# Compile-only checks for the BPF and kmod backends. Nothing here loads a
+# program into or boots a WSL2 kernel, so this does not replace testing on
+# WSL2 -- it catches API and prototype drift against real WSL kernel trees.
+#
+# No path filters: a required check whose workflow is skipped leaves a pull
+# request waiting forever, and the run takes a few minutes.
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+  # Weekly, so drift in the runner images or upstream WSL kernels shows up
+  # without a commit to trigger it.
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kernel-backends-${{ github.ref }}
+  cancel-in-progress: true
+
+# An explicit bash shell adds pipefail, so `make | tee` fails when make does.
+defaults:
+  run:
+    shell: bash
+
+env:
+  BPFTOOL_VERSION: v7.7.0
+
+jobs:
+  bpf:
+    name: BPF (${{ matrix.os }})
+    # setup.sh builds against the distro's libbpf-dev: 22.04 ships 0.5, which
+    # lacks the bpf_get_func_arg declarations (ugow.bpf.c declares its own),
+    # and 24.04 ships 1.3.
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y clang llvm libbpf-dev
+          # Ubuntu's bpftool is tied to the running kernel's linux-tools
+          # package; the upstream static build is not.
+          cd "$RUNNER_TEMP"
+          tarball="bpftool-${BPFTOOL_VERSION}-amd64.tar.gz"
+          base="https://github.com/libbpf/bpftool/releases/download/${BPFTOOL_VERSION}"
+          curl -fsSLO "$base/$tarball"
+          curl -fsSLO "$base/$tarball.sha256sum"
+          sha256sum -c "$tarball.sha256sum"
+          tar xzf "$tarball"
+          sudo install -m 755 bpftool /usr/local/bin/bpftool
+          bpftool version
+
+      # vmlinux.h comes from the runner's kernel BTF. Every field the program
+      # reads through CO-RE exists in 6.6 and later, so this is sufficient to
+      # compile; the WSL jobs' prototype check is what ties it to WSL kernels.
+      - name: Build ugow.bpf.o
+        run: make -C bpf CLANG="clang -Werror"
+
+      - name: Load through the verifier (runner kernel)
+        # The runner's kernel is not a WSL kernel, and loading attaches
+        # nothing, but it is the one place short of WSL2 where the verifier
+        # sees these programs -- including the bpf_get_func_arg() calls.
+        run: |
+          uname -r
+          sudo bpftool prog loadall bpf/ugow.bpf.o /sys/fs/bpf/ugow-ci type lsm
+          sudo ls /sys/fs/bpf/ugow-ci
+          sudo rm -rf /sys/fs/bpf/ugow-ci
+
+  wsl:
+    # Named by series, not tag, so a tag bump does not rename a required check.
+    name: WSL ${{ matrix.series }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # The two series WSL ships: the BPF backend runs on either unmodified,
+        # and kmod/README.md documents building the kmod into either. The
+        # weekly `pins` job reports when a newer tag or series appears.
+        include:
+          - series: '6.6'
+            tag: linux-msft-wsl-6.6.123.2
+          - series: '6.18'
+            tag: linux-msft-wsl-6.18.40.1
+    env:
+      KSRC: ${{ github.workspace }}/../linux
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y build-essential flex bison bc libelf-dev libssl-dev
+
+      - name: Fetch ${{ matrix.tag }}
+        id: fetch
+        run: |
+          mkdir -p "$KSRC"
+          curl -fsSL "https://github.com/microsoft/WSL2-Linux-Kernel/archive/refs/tags/${{ matrix.tag }}.tar.gz" \
+            | tar xz --strip-components=1 -C "$KSRC"
+
+      # Each check below depends only on the fetch, so one failing does not
+      # skip -- and hide the result of -- the others.
+
+      - name: BPF hook prototypes
+        if: ${{ !cancelled() && steps.fetch.outcome == 'success' }}
+        run: |
+          python3 .github/scripts/check_lsm_hooks.py \
+            "$KSRC/include/linux/lsm_hook_defs.h" bpf/ugow.bpf.c "${{ matrix.tag }}"
+
+      # The same steps kmod/README.md gives, so this also checks the docs.
+      - name: "kmod: wire into the tree"
+        id: wire
+        if: ${{ !cancelled() && steps.fetch.outcome == 'success' }}
+        run: |
+          cp -r kmod "$KSRC/security/ugow"
+          cd "$KSRC"
+          # shellcheck disable=SC2016 # $(CONFIG_...) is make syntax, not shell
+          printf '%s\n' 'subdir-$(CONFIG_SECURITY_UGOW) += ugow' \
+                        'obj-$(CONFIG_SECURITY_UGOW) += ugow/' >> security/Makefile
+          echo 'source "security/ugow/Kconfig"' >> security/Kconfig
+          # 6.12+ sizes its LSM tables from lsm_count.h, which must count UGOW.
+          if [[ -f include/linux/lsm_count.h ]]; then
+            patch -p1 < security/ugow/lsm_count.patch
+          fi
+          cp Microsoft/config-wsl .config
+          scripts/config --enable CONFIG_SECURITY_UGOW
+          scripts/config --set-str CONFIG_LSM "landlock,lockdown,yama,loadpin,safesetid,integrity,apparmor,bpf,ugow"
+          make olddefconfig
+          # olddefconfig silently drops an option whose dependencies are unmet,
+          # which would leave nothing to compile and the job green.
+          grep -qx 'CONFIG_SECURITY_UGOW=y' .config
+          grep -qx 'CONFIG_SECURITY_UGOW_ROOT_EXEMPT=y' .config
+
+      - name: "kmod: build ugow_lsm.o"
+        if: ${{ !cancelled() && steps.wire.outcome == 'success' }}
+        run: |
+          cd "$KSRC"
+          make -j"$(nproc)" security/ugow/ugow_lsm.o 2>&1 | tee "$RUNNER_TEMP/build.log"
+          test -s security/ugow/ugow_lsm.o
+          # prepare finishes before kbuild descends into security/ugow, so
+          # everything after this line comes from compiling ugow_lsm.c --
+          # including warnings reported against kernel headers it includes.
+          # The rest of the tree is not ours to keep warning-free.
+          marker='^ *CC +security/ugow/ugow_lsm\.o$'
+          if ! grep -qE "$marker" "$RUNNER_TEMP/build.log"; then
+            echo "::error::no 'CC security/ugow/ugow_lsm.o' line in the build log"
+            exit 1
+          fi
+          if sed -En "\\#$marker#,\$p" "$RUNNER_TEMP/build.log" | grep -E '(warning|error):'; then
+            echo "::error::ugow_lsm.c builds with warnings"
+            exit 1
+          fi
+
+      - name: "kmod: checkpatch"
+        if: ${{ !cancelled() && steps.fetch.outcome == 'success' }}
+        # LINUX_VERSION_CODE and CONSTANT_COMPARISON flag the version guards
+        # that let one source build into both kernel series; in-tree code
+        # would not need them, but ugow_lsm.c is not in-tree.
+        run: |
+          "$KSRC/scripts/checkpatch.pl" --no-tree --terse \
+            --ignore LINUX_VERSION_CODE,CONSTANT_COMPARISON \
+            -f kmod/ugow_lsm.c
+
+  pins:
+    name: Pinned WSL kernels are current
+    # Only on the schedule: a new upstream release must not fail unrelated
+    # pushes and pull requests.
+    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compare with upstream WSL kernel tags
+        run: |
+          pinned=$(grep -oE 'linux-msft-wsl-[0-9]+(\.[0-9]+)+' .github/workflows/kernel-backends.yml | sort -uV)
+          upstream=$(git ls-remote --tags --refs https://github.com/microsoft/WSL2-Linux-Kernel.git 'linux-msft-wsl-*' \
+            | sed 's#.*/##' | grep -E '^linux-msft-wsl-[0-9]+(\.[0-9]+)+$' | sort -V)
+          [[ -n $pinned && -n $upstream ]] || { echo "::error::could not read pinned or upstream tags"; exit 1; }
+
+          series_of() { cut -d. -f1-2 <<<"$1"; }
+          status=0
+          for tag in $pinned; do
+            series=$(series_of "$tag")
+            latest=$(while read -r t; do [[ $(series_of "$t") == "$series" ]] && echo "$t"; done <<<"$upstream" | tail -1)
+            if [[ $latest == "$tag" ]]; then
+              echo "$tag is the newest $series tag"
+            else
+              echo "::error::$tag is pinned, but ${latest:-no tag} is the newest in its series"
+              status=1
+            fi
+          done
+
+          newest=$(tail -1 <<<"$upstream")
+          if ! grep -qx "$(series_of "$newest")" <<<"$(for t in $pinned; do series_of "$t"; done)"; then
+            echo "::error::WSL has a newer kernel series ($newest) that CI does not build"
+            status=1
+          fi
+          exit $status

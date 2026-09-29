@@ -1,0 +1,35 @@
+Count UGOW in MAX_LSM_COUNT (Linux 6.12 and later).
+
+The kernel sizes its per-hook static call tables and its LSM order from the
+fixed list of LSMs in this header. An LSM missing from it only gets a slot if
+some other built-in LSM is inactive; otherwise it is dropped at boot with an
+"out of LSM static calls" warning and enforces nothing. ugow_lsm.c refuses to
+build against a lsm_count.h without UGOW_ENABLED.
+
+Apply from the kernel tree root:  patch -p1 < security/ugow/lsm_count.patch
+
+--- a/include/linux/lsm_count.h
++++ b/include/linux/lsm_count.h
+@@ -102,6 +102,12 @@
+ #define IPE_ENABLED
+ #endif
+ 
++#if IS_ENABLED(CONFIG_SECURITY_UGOW)
++#define UGOW_ENABLED 1,
++#else
++#define UGOW_ENABLED
++#endif
++
+ /*
+  *  There is a trailing comma that we need to be accounted for. This is done by
+  *  using a skipped argument in __COUNT_LSMS
+@@ -124,7 +130,8 @@
+ 		LANDLOCK_ENABLED	\
+ 		IMA_ENABLED		\
+ 		EVM_ENABLED		\
+-		IPE_ENABLED)
++		IPE_ENABLED		\
++		UGOW_ENABLED)
+ 
+ #else
+ 

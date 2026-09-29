@@ -52,6 +52,43 @@ FUSE_CONF=/etc/fuse.conf
 UGOW_BIN=/usr/local/bin/ugow
 UGOW_LIB=/opt/ugow/lib
 VE=/opt/ugow
+UGOW_STATE=/var/lib/ugow
+DRIVES_FILE="$UGOW_STATE/drives"
+
+# ── INI editing ────────────────────────────────────────────────────────────
+
+# Set key = value inside one INI section, leaving identically-named keys in
+# other sections alone. A plain `sed s/^enabled.*/` would also rewrite
+# [interop] enabled, [network] enabled, and so on.
+_ini_set() {
+  local file="$1" section="$2" key="$3" value="$4" tmp
+  tmp="$(mktemp)"
+  awk -v section="$section" -v key="$key" -v value="$value" '
+    BEGIN { in_section = 0; done = 0; seen_section = 0 }
+    /^[[:space:]]*\[/ {
+      if (in_section && !done) { print key " = " value; done = 1 }
+      in_section = ($0 ~ "^[[:space:]]*\\[" section "\\][[:space:]]*$")
+      if (in_section) seen_section = 1
+      print
+      next
+    }
+    {
+      if (in_section && $0 ~ "^[[:space:]]*" key "[[:space:]]*=") {
+        if (!done) { print key " = " value; done = 1 }
+        next
+      }
+      print
+    }
+    END {
+      if (!done) {
+        if (!seen_section) print "[" section "]"
+        print key " = " value
+      }
+    }
+  ' "$file" > "$tmp"
+  sudo cp "$tmp" "$file"
+  rm -f "$tmp"
+}
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Uninstall
@@ -110,6 +147,9 @@ BANNER
   fi
   sudo rm -f /etc/systemd/system/ugow-bpf.service
 
+  sudo systemctl disable ugow-sync.service 2>/dev/null || true
+  sudo rm -f /etc/systemd/system/ugow-sync.service
+
   sudo systemctl daemon-reload
 
   # Unmount any remaining FUSE backing mounts
@@ -125,9 +165,10 @@ BANNER
   # Remove BPF pins
   sudo rm -rf /sys/fs/bpf/ugow
 
-  # Re-enable WSL automount so drives mount normally on next restart
-  if grep -q 'enabled = false' "$WSL_CONF" 2>/dev/null; then
-    sudo sed -i 's/enabled = false/enabled = true/' "$WSL_CONF"
+  # Re-enable WSL automount so drives mount normally on next restart.
+  # Scoped to [automount]: other sections legitimately carry enabled = false.
+  if [[ -f "$WSL_CONF" ]]; then
+    _ini_set "$WSL_CONF" automount enabled true
     echo "  WSL automount re-enabled in $WSL_CONF"
   fi
 
@@ -210,30 +251,11 @@ _ugow_set_wsl_conf() {
   local automount_enabled="$1"
 
   sudo touch "$WSL_CONF"
-
-  # Ensure [automount] section exists and set enabled + options
-  if grep -q '^\[automount\]' "$WSL_CONF"; then
-    if grep -q '^enabled' "$WSL_CONF"; then
-      sudo sed -i "s/^enabled.*/enabled = $automount_enabled/" "$WSL_CONF"
-    else
-      sudo sed -i "/^\[automount\]/a enabled = $automount_enabled" "$WSL_CONF"
-    fi
-    if ! grep -q '^options' "$WSL_CONF"; then
-      sudo sed -i '/^\[automount\]/a options = "metadata"' "$WSL_CONF"
-    fi
-  else
-    printf '\n[automount]\nenabled = %s\noptions = "metadata"\n' \
-      "$automount_enabled" | sudo tee -a "$WSL_CONF" > /dev/null
+  _ini_set "$WSL_CONF" automount enabled "$automount_enabled"
+  if ! awk '/^[[:space:]]*\[automount\]/{f=1;next} /^[[:space:]]*\[/{f=0} f && /^[[:space:]]*options[[:space:]]*=/{found=1} END{exit !found}' "$WSL_CONF"; then
+    _ini_set "$WSL_CONF" automount options '"metadata"'
   fi
-
-  # Ensure [boot] section exists with systemd = true
-  if grep -q '^\[boot\]' "$WSL_CONF"; then
-    if ! grep -q '^systemd' "$WSL_CONF"; then
-      sudo sed -i '/^\[boot\]/a systemd = true' "$WSL_CONF"
-    fi
-  else
-    printf '\n[boot]\nsystemd = true\n' | sudo tee -a "$WSL_CONF" > /dev/null
-  fi
+  _ini_set "$WSL_CONF" boot systemd true
 }
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -256,9 +278,15 @@ sudo mkdir -p "$UGOW_LIB"
 sudo install -m 644 "$SCRIPT_DIR/permstore.py" "$UGOW_LIB/permstore.py"
 sudo install -m 755 "$SCRIPT_DIR/cli.py"       "$UGOW_BIN"
 
-sudo mkdir -p /var/lib/ugow
-sudo chmod 0700 /var/lib/ugow
-sudo chown root:root /var/lib/ugow
+sudo mkdir -p "$UGOW_STATE"
+sudo chmod 0700 "$UGOW_STATE"
+sudo chown root:root "$UGOW_STATE"
+
+# Grants live in kernel memory for the kmod and BPF backends and are lost on
+# every WSL restart, so replay them at boot.
+sudo install -m 644 "$SCRIPT_DIR/kmod/ugow-sync.service" \
+  /etc/systemd/system/ugow-sync.service
+sudo systemctl enable ugow-sync.service >/dev/null 2>&1 || true
 
 if [ ! -d "$VE/venv" ]; then
   sudo mkdir -p "$VE"
@@ -303,6 +331,7 @@ if [[ "$MODE" == "fuse" ]]; then
   echo "# Shim: UGOW" | sudo tee -a "$SHIM_BIN" >/dev/null
   sudo install -m 644 "$SCRIPT_DIR/permstore.py" "$UGOW_LIB/permstore.py"
   sudo install -m 755 "$SCRIPT_DIR/fuse/mount-backing.sh" "$UGOW_LIB/mount-backing.sh"
+  sudo install -m 755 "$SCRIPT_DIR/fuse/wait-mount.sh" "$UGOW_LIB/wait-mount.sh"
 
   # Enable user_allow_other in /etc/fuse.conf
   if ! grep -q '^user_allow_other' "$FUSE_CONF"; then
@@ -319,6 +348,9 @@ if [[ "$MODE" == "fuse" ]]; then
 [Unit]
 Description=UGOW FUSE Shim for /mnt/%i
 After=local-fs.target
+# StartLimit* are [Unit] directives; systemd ignores them under [Service].
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -331,11 +363,13 @@ ExecStartPre=/bin/mkdir -p /mnt/.%i-backing /mnt/%i
 ExecStartPre=${UGOW_LIB}/mount-backing.sh %i
 Environment=PYTHONPATH=${UGOW_LIB}
 ExecStart=${VE}/venv/bin/python ${SHIM_BIN} --launcher-uid ${REAL_UID} /mnt/.%i-backing /mnt/%i
+# The shim is only usable once libfuse has finished mounting. Type=simple would
+# report the unit started at fork, letting units ordered after it race an
+# unmounted /mnt/%i; blocking here keeps that ordering honest.
+ExecStartPost=${UGOW_LIB}/wait-mount.sh %i
 ExecStopPost=-/bin/sh -c 'fusermount -uz /mnt/%i 2>/dev/null; umount -l /mnt/%i 2>/dev/null; umount /mnt/.%i-backing 2>/dev/null; true'
 Restart=on-failure
 RestartSec=5
-StartLimitIntervalSec=60
-StartLimitBurst=5
 
 [Install]
 WantedBy=multi-user.target
@@ -358,7 +392,7 @@ EOF
   FUSE mode installed successfully.
 
   Architecture (per drive):
-    Raw DrvFs  -> /mnt/.<letter>-backing  (root-only, chmod 0700)
+    Raw DrvFs  -> /mnt/.<letter>-backing  (root-only: umask=077,nosuid,nodev)
     FUSE shim  -> /mnt/<letter>           (transparent to all users)
 
   Drive C: is active by default. Add more with:
@@ -425,6 +459,14 @@ BPFTOOL_HELP
     exit 1
   fi
 
+  # ugow.bpf.c includes <bpf/bpf_helpers.h>; without libbpf headers the build
+  # fails with a bare "file not found" that says nothing about the cause.
+  if ! echo '#include <bpf/bpf_helpers.h>' | clang -target bpf -E - >/dev/null 2>&1; then
+    echo "Error: libbpf headers not found (<bpf/bpf_helpers.h>)." >&2
+    echo "  Install with: sudo apt install -y libbpf-dev" >&2
+    exit 1
+  fi
+
   # Check if BPF LSM is in the active security module list
   _lsm_list=""
   if mount -t securityfs securityfs /sys/kernel/security 2>/dev/null; then true; fi
@@ -481,13 +523,20 @@ Type=oneshot
 RemainAfterExit=yes
 Environment=PYTHONPATH=${UGOW_LIB}
 ExecStart=${VE}/venv/bin/python ${UGOW_LIB}/ugow_manage.py load
-ExecStartPost=${VE}/venv/bin/python ${UGOW_LIB}/ugow_manage.py add-device /mnt/c
+# Re-register every managed drive, not just C:. Device numbers change across a
+# wsl --shutdown, so a drive left out here would come back unenforced while its
+# granted paths keep the widened permissions ugow allow gave them.
+ExecStartPost=${VE}/venv/bin/python ${UGOW_LIB}/ugow_manage.py restore-devices
 ExecStartPost=${VE}/venv/bin/python ${UGOW_LIB}/ugow_manage.py sync
 ExecStop=${VE}/venv/bin/python ${UGOW_LIB}/ugow_manage.py unload
 
 [Install]
 WantedBy=multi-user.target
 EOF
+
+  # Seed the managed-drive list so restore-devices has C: to re-register.
+  printf 'c\n' | sudo tee "$DRIVES_FILE" > /dev/null
+  sudo chmod 600 "$DRIVES_FILE"
 
   sudo systemctl daemon-reload
   sudo systemctl enable --now ugow-bpf.service

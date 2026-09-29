@@ -237,6 +237,178 @@ class TestCommandIntegration:
         assert "via" in captured.out
 
 
+class TestBackendOrdering:
+    """A grant must not land in SQLite unless the active kernel backend took it."""
+
+    @pytest.fixture()
+    def tmp_db(self, tmp_path):
+        return str(tmp_path / "order.db")
+
+    @pytest.fixture()
+    def fake_args(self, tmp_db):
+        def _make(**kwargs):
+            defaults = {"db": tmp_db, "mirror_acl": False}
+            defaults.update(kwargs)
+            return types.SimpleNamespace(**defaults)
+        return _make
+
+    def test_failed_backend_aborts_the_grant(
+        self, monkeypatch, fake_args, tmp_db, tmp_path, capsys
+    ):
+        from cli import cmd_allow
+
+        monkeypatch.setattr("os.getuid", lambda: 0)
+        monkeypatch.setattr("cli._bpf_active", lambda: True)
+        monkeypatch.setattr("cli._kmod_active", lambda: False)
+        monkeypatch.setattr("cli._bpf_grant", lambda uid, path: "BPF grant failed: nope")
+
+        target = str(tmp_path / "data")
+        os.makedirs(target, exist_ok=True)
+
+        with pytest.raises(SystemExit) as exc:
+            cmd_allow(fake_args(user="0", path=target))
+        assert exc.value.code == 1
+
+        # Nothing was written, so `check` cannot claim a permission that the
+        # kernel would refuse.
+        assert PermStore(db_path=tmp_db, mirror_acl=False).has_wbit(target, 0) is False
+
+    def test_successful_backend_commits_the_grant(
+        self, monkeypatch, fake_args, tmp_db, tmp_path
+    ):
+        from cli import cmd_allow
+
+        monkeypatch.setattr("os.getuid", lambda: 0)
+        monkeypatch.setattr("cli._bpf_active", lambda: True)
+        monkeypatch.setattr("cli._kmod_active", lambda: False)
+        monkeypatch.setattr("cli._bpf_grant", lambda uid, path: None)
+        monkeypatch.setattr("cli._relax_dac_for_bpf", lambda store, path: None)
+
+        target = str(tmp_path / "data")
+        os.makedirs(target, exist_ok=True)
+        cmd_allow(fake_args(user="0", path=target))
+        assert PermStore(db_path=tmp_db, mirror_acl=False).has_wbit(target, 0) is True
+
+    def test_deny_still_revokes_when_backend_errors(
+        self, monkeypatch, fake_args, tmp_db, tmp_path
+    ):
+        """A backend error on revoke must not leave the permission in place."""
+        from cli import cmd_deny
+
+        monkeypatch.setattr("os.getuid", lambda: 0)
+        monkeypatch.setattr("cli._bpf_active", lambda: True)
+        monkeypatch.setattr("cli._kmod_active", lambda: False)
+        monkeypatch.setattr("cli._bpf_revoke", lambda uid, path: "BPF revoke failed")
+        monkeypatch.setattr("cli._restore_dac_after_bpf", lambda store, path: None)
+
+        target = str(tmp_path / "data")
+        os.makedirs(target, exist_ok=True)
+        PermStore(db_path=tmp_db, mirror_acl=False).grant(target, 0)
+
+        with pytest.raises(SystemExit) as exc:
+            cmd_deny(fake_args(user="0", path=target))
+        assert exc.value.code == 1
+        assert PermStore(db_path=tmp_db, mirror_acl=False).has_wbit(target, 0) is False
+
+
+class TestDacRestore:
+    """BPF mode widens DAC; leaving it widened after a revoke is an open door."""
+
+    def test_original_mode_is_restored_on_last_revoke(self, tmp_path):
+        from cli import _relax_dac_for_bpf, _restore_dac_after_bpf
+
+        store = PermStore(db_path=str(tmp_path / "dac.db"), mirror_acl=False)
+        target = tmp_path / "restricted"
+        target.mkdir()
+        target.chmod(0o700)
+
+        store.grant(str(target), 1000)
+        _relax_dac_for_bpf(store, str(target))
+        assert target.stat().st_mode & 0o222 == 0o222
+
+        store.revoke(str(target), 1000)
+        _restore_dac_after_bpf(store, str(target))
+        assert target.stat().st_mode & 0o777 == 0o700
+
+    def test_mode_kept_while_another_uid_still_holds_a_grant(self, tmp_path):
+        from cli import _relax_dac_for_bpf, _restore_dac_after_bpf
+
+        store = PermStore(db_path=str(tmp_path / "dac.db"), mirror_acl=False)
+        target = tmp_path / "shared"
+        target.mkdir()
+        target.chmod(0o700)
+
+        store.grant(str(target), 1000)
+        store.grant(str(target), 2000)
+        _relax_dac_for_bpf(store, str(target))
+
+        store.revoke(str(target), 1000)
+        _restore_dac_after_bpf(store, str(target))
+        assert target.stat().st_mode & 0o222 == 0o222
+
+        store.revoke(str(target), 2000)
+        _restore_dac_after_bpf(store, str(target))
+        assert target.stat().st_mode & 0o777 == 0o700
+
+    def test_already_writable_path_is_not_recorded(self, tmp_path):
+        from cli import _relax_dac_for_bpf
+
+        store = PermStore(db_path=str(tmp_path / "dac.db"), mirror_acl=False)
+        target = tmp_path / "open"
+        target.mkdir()
+        target.chmod(0o777)
+        _relax_dac_for_bpf(store, str(target))
+        assert store.forget_dac_mode(str(target)) is None
+
+
+class TestKmodKey:
+    """The kmod compares superblock-relative paths, so the CLI must send those."""
+
+    def test_key_is_dev_plus_superblock_relative_path(self, monkeypatch, tmp_path):
+        from cli import _kmod_key
+
+        monkeypatch.setattr("cli._mount_point", lambda p: "/mnt/c")
+        fake = os.stat_result((0o40755, 1, os.makedev(0, 52), 1, 0, 0, 0, 0, 0, 0))
+        monkeypatch.setattr("os.stat", lambda p: fake)
+
+        dev, rel = _kmod_key("/mnt/c/docker/sub")
+        assert dev == "0:52"
+        assert rel == "/docker/sub"
+
+    def test_mount_root_maps_to_slash(self, monkeypatch):
+        from cli import _kmod_key
+
+        monkeypatch.setattr("cli._mount_point", lambda p: "/mnt/c")
+        fake = os.stat_result((0o40755, 1, os.makedev(0, 52), 1, 0, 0, 0, 0, 0, 0))
+        monkeypatch.setattr("os.stat", lambda p: fake)
+
+        dev, rel = _kmod_key("/mnt/c")
+        assert rel == "/"
+
+    def test_missing_path_is_reported_not_raised(self, monkeypatch):
+        from cli import _kmod_write
+
+        monkeypatch.setattr("cli._mount_point", lambda p: "/mnt/c")
+        err = _kmod_write("grant", 1000, "/mnt/c/does-not-exist")
+        assert err is not None
+        assert "exist" in err
+
+
+class TestMissingHelperBinary:
+    def test_absent_bpftool_reports_instead_of_tracebacking(self, monkeypatch, tmp_path):
+        from cli import _bpf_grant
+
+        def boom(*a, **k):
+            raise FileNotFoundError("bpftool")
+
+        monkeypatch.setattr("subprocess.run", boom)
+        target = tmp_path / "x"
+        target.mkdir()
+        err = _bpf_grant(1000, str(target))
+        assert err is not None
+        assert "bpftool" in err
+
+
 # ---------------------------------------------------------------------------
 # main() arg dispatch
 # ---------------------------------------------------------------------------

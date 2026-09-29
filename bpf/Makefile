@@ -15,6 +15,10 @@ CFLAGS := -O2 -g -Wall \
 
 .PHONY: all clean vmlinux
 
+# The vmlinux.h rule redirects into its target, so a bpftool failure would
+# otherwise leave a truncated header behind that later builds treat as valid.
+.DELETE_ON_ERROR:
+
 all: $(VMLINUX_H) ugow.bpf.o
 
 $(VMLINUX_H):

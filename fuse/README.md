@@ -20,19 +20,29 @@ backend to deploy, works on any stock WSL2 kernel.
                      ┌───────────┴───────────┐
                      │   /mnt/.<letter>-      │
                      │     backing            │
-                     │   (raw DrvFs, 0700,    │
-                     │    root-only)          │
+                     │   (raw DrvFs,          │
+                     │    umask=077,          │
+                     │    nosuid, nodev)      │
                      └───────────────────────┘
 ```
 
 Each Windows drive gets its own isolated FUSE instance managed by a systemd
 template unit (`wsl-fuse-shim@<letter>.service`). The raw DrvFs is remounted
-under a hidden backing directory (`/mnt/.<letter>-backing`) and the FUSE shim
-presents the user-visible mount at `/mnt/<letter>`.
+under a hidden backing directory (`/mnt/.<letter>-backing`) with
+`metadata,umask=077,nosuid,nodev` and the FUSE shim presents the user-visible
+mount at `/mnt/<letter>`.
 
-Write-class VFS operations -- `open`, `create`, `truncate`, `mkdir`, `unlink`,
-`rmdir`, `rename`, `symlink`, and `link` -- are gated by the SQLite-backed
-permission store. Read operations pass through unmodified.
+Write-class VFS operations -- `access` (for `W_OK`), `open`, `create`,
+`truncate`, `mkdir`, `unlink`, `rmdir`, `rename`, `symlink`, `link`, `chmod`,
+and `utimens` -- are gated by the SQLite-backed permission store. Read
+operations pass through unmodified.
+
+`chmod` and `utimens` are metadata writes and gated like any other write: the
+shim runs as root, so an ungated `chmod` would let any caller re-mode every file
+on the drive. `chmod` also masks off the `setuid` and `setgid` bits. `link`
+requires the W-bit on the source file as well as the destination parent, so a
+second name never confers rights the first one lacked. `chown` remains
+root-only, tested against the real caller UID rather than the root-remapped one.
 
 ---
 
@@ -102,12 +112,28 @@ getfattr -n user.ugow.wbit /mnt/c/data    # "1" = granted, "0" = denied
   (`0o222`) from the reported `st_mode` based on the calling user's grants.
   This gives correct `ls -l` output without modifying the underlying filesystem.
 
+- **No attribute caching** -- the mount runs with `attr_timeout=0`,
+  `entry_timeout=0` and `negative_timeout=0`. `getattr` answers for the calling
+  UID, but the kernel's attribute cache is per-inode, so caching would let one
+  user's mode answer decide `default_permissions` checks for another. The FUSE
+  mount is `nosuid,nodev` as well.
+
+- **Audited denials** -- every denial is logged as a warning by the `ugow`
+  logger with the operation, calling UID and mount-visible path. Read them with
+  `sudo journalctl -u wsl-fuse-shim@c.service`.
+
 - **Path-escape protection** -- all path operations are resolved against the
   backing root and rejected if they escape it via `..` or symlinks.
 
 - **Backing mount retries** -- `mount-backing.sh` handles transient DrvFs mount
   failures (common immediately after WSL boot) by retrying up to 5 times with a
   2-second delay.
+
+- **Start-up ordering** -- the shim runs in the foreground, so `Type=simple`
+  would report the unit started at fork, before libfuse has mounted anything.
+  `wait-mount.sh` runs as `ExecStartPost` and blocks until `/mnt/<letter>` is
+  really a mount point, so units ordered `After=` it do not race an unmounted
+  drive.
 
 - **Shared database** -- grants live in the same SQLite DB as all other backends
   (`/var/lib/ugow/wperm.db`), so you can switch between enforcement layers
@@ -120,6 +146,7 @@ getfattr -n user.ugow.wbit /mnt/c/data    # "1" = granted, "0" = denied
 ```
 shim.py              FUSE overlay daemon (UGOWShim + entry point)
 mount-backing.sh     DrvFs backing mount helper with retry logic
+wait-mount.sh        ExecStartPost guard: blocks until /mnt/<letter> is mounted
 ```
 
 ---

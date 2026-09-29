@@ -6,8 +6,11 @@
  * (inode, device, uid).  Walks the dentry tree upward so a grant on a
  * directory covers all descendants.
  *
- * Only enforces on devices listed in the target_devs map (populated by
- * the userspace loader with the dev_t of 9P mounts).
+ * Only enforces on devices listed in the target_devs map, which the
+ * userspace loader populates from the mounts it has been told to manage
+ * (recorded in /var/lib/ugow/drives and replayed at boot).  Keying on the
+ * device rather than the filesystem type keeps this working across WSL
+ * releases, which have shipped /mnt/c as 9p and as virtiofs.
  *
  * Compile:
  *   clang -O2 -g -target bpf -D__TARGET_ARCH_x86 \
@@ -19,6 +22,24 @@
 #ifndef EACCES
 #define EACCES 13
 #endif
+
+/*
+ * struct iattr::ia_valid bits. These are preprocessor defines in <linux/fs.h>,
+ * so they carry no BTF and are absent from vmlinux.h -- they have to be
+ * restated here. Values are from include/linux/fs.h and are ABI-stable.
+ */
+#define UGOW_ATTR_MODE		(1 << 0)
+#define UGOW_ATTR_UID		(1 << 1)
+#define UGOW_ATTR_GID		(1 << 2)
+#define UGOW_ATTR_SIZE		(1 << 3)
+#define UGOW_ATTR_ATIME		(1 << 4)
+#define UGOW_ATTR_MTIME		(1 << 5)
+#define UGOW_ATTR_ATIME_SET	(1 << 7)
+#define UGOW_ATTR_MTIME_SET	(1 << 8)
+
+#define UGOW_GATED_ATTRS (UGOW_ATTR_MODE | UGOW_ATTR_UID | UGOW_ATTR_GID | \
+			  UGOW_ATTR_SIZE | UGOW_ATTR_ATIME | UGOW_ATTR_MTIME | \
+			  UGOW_ATTR_ATIME_SET | UGOW_ATTR_MTIME_SET)
 
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
@@ -59,12 +80,47 @@ struct {
 /* ------------------------------------------------------------------ */
 
 /*
+ * Declared here rather than taken from <bpf/bpf_helper_defs.h>: libbpf only
+ * added these in 0.7, and setup.sh builds against whatever libbpf-dev the
+ * distro ships (Ubuntu 22.04 has 0.5).  The IDs are UAPI and come from the
+ * kernel's own BTF via vmlinux.h.
+ */
+static long (* const ugow_get_func_arg)(void *ctx, __u32 n, __u64 *value) =
+	(void *)BPF_FUNC_get_func_arg;
+static __u64 (* const ugow_get_func_arg_cnt)(void *ctx) =
+	(void *)BPF_FUNC_get_func_arg_cnt;
+
+/*
  * Check whether the device backing this inode is one we enforce on.
  */
+static __always_inline bool is_target_dev_num(__u32 dev)
+{
+	return bpf_map_lookup_elem(&target_devs, &dev) != NULL;
+}
+
 static __always_inline bool is_target_dev(struct inode *inode)
 {
-	__u32 dev = BPF_CORE_READ(inode, i_sb, s_dev);
-	return bpf_map_lookup_elem(&target_devs, &dev) != NULL;
+	return is_target_dev_num(BPF_CORE_READ(inode, i_sb, s_dev));
+}
+
+static __always_inline bool is_target_dentry(struct dentry *dentry)
+{
+	return is_target_dev_num(BPF_CORE_READ(dentry, d_sb, s_dev));
+}
+
+/*
+ * Filesystem uid of the current task.
+ *
+ * bpf_get_current_uid_gid() returns the *real* uid, which diverges from the
+ * uid the VFS actually authorizes with whenever a task has called setfsuid()
+ * -- notably file servers and some container runtimes.  Read cred->fsuid so
+ * the decision matches the one the kernel's own DAC check makes.
+ */
+static __always_inline __u32 current_fsuid(void)
+{
+	struct task_struct *task = (struct task_struct *)bpf_get_current_task_btf();
+
+	return BPF_CORE_READ(task, cred, fsuid.val);
 }
 
 /*
@@ -124,7 +180,7 @@ int BPF_PROG(ugow_file_open, struct file *file)
 	if (!is_target_dev(inode))
 		return 0;
 
-	__u32 uid = bpf_get_current_uid_gid() & 0xFFFFFFFF;
+	__u32 uid = current_fsuid();
 	if (uid == 0)
 		return 0;
 	struct dentry *dentry = BPF_CORE_READ(file, f_path.dentry);
@@ -139,13 +195,105 @@ int BPF_PROG(ugow_inode_permission, struct inode *inode, int mask)
 	if (!is_target_dev(inode))
 		return 0;
 
-	__u32 uid = bpf_get_current_uid_gid() & 0xFFFFFFFF;
+	__u32 uid = current_fsuid();
 	if (uid == 0)
 		return 0;
+
+	/*
+	 * This hook only gets an inode, so it cannot know which name the caller
+	 * used. For a multiply-linked inode any alias we pick may be the wrong
+	 * one, and guessing could wrongly allow a write through an ungranted
+	 * name. Defer to file_open and the inode_* hooks, which receive the real
+	 * dentry -- deferring loses no enforcement, since those still run.
+	 */
+	if (BPF_CORE_READ(inode, i_nlink) > 1)
+		return 0;
+
 	struct hlist_node *first = BPF_CORE_READ(inode, i_dentry.first);
 	if (!first)
-		return -EACCES;
+		return 0;
 	struct dentry *dentry = container_of(first, struct dentry, d_u.d_alias);
+	return check_wbit_dentry(dentry, uid);
+}
+
+/*
+ * Metadata writes: chmod, chown, truncate and utimensat all arrive here.
+ * Without this hook an unprivileged caller could re-mode any file on an
+ * enforced drive, which is a write in every sense that matters.
+ *
+ * Linux 6.9 prepended a struct mnt_idmap * to this hook, so WSL's 6.6 kernels
+ * pass (dentry, attr) and its 6.18 kernels (idmap, dentry, attr).  BPF_PROG()
+ * binds arguments by position, and with either fixed prototype the other
+ * kernel would read the wrong slots and fail open.  dentry and attr are the
+ * last two arguments on both, so fetch them relative to the argument count
+ * the trampoline records.  Indexing ctx directly would not work: the verifier
+ * rejects any ctx access past the hook's arity, even in an untaken branch.
+ */
+SEC("lsm/inode_setattr")
+int ugow_inode_setattr(unsigned long long *ctx)
+{
+	__u64 nr_args = ugow_get_func_arg_cnt(ctx);
+	__u64 dentry_arg = 0, attr_arg = 0;
+
+	/*
+	 * Cannot fail: the hook has had at least two arguments on every
+	 * kernel.  Allow rather than deny if it somehow does -- this runs
+	 * before the device filter, so a denial would break chmod everywhere.
+	 */
+	if (ugow_get_func_arg(ctx, nr_args - 2, &dentry_arg) ||
+	    ugow_get_func_arg(ctx, nr_args - 1, &attr_arg))
+		return 0;
+
+	struct dentry *dentry = (struct dentry *)dentry_arg;
+	struct iattr *attr = (struct iattr *)attr_arg;
+
+	if (!(BPF_CORE_READ(attr, ia_valid) & UGOW_GATED_ATTRS))
+		return 0;
+	if (!is_target_dentry(dentry))
+		return 0;
+
+	__u32 uid = current_fsuid();
+	if (uid == 0)
+		return 0;
+	return check_wbit_dentry(dentry, uid);
+}
+
+/* inode_create covers only regular files; this covers FIFOs, sockets and
+ * device nodes. */
+SEC("lsm/inode_mknod")
+int BPF_PROG(ugow_inode_mknod, struct inode *dir, struct dentry *dentry,
+	     umode_t mode, dev_t dev)
+{
+	if (!is_target_dev(dir))
+		return 0;
+	__u32 uid = current_fsuid();
+	if (uid == 0)
+		return 0;
+	return check_parent_wbit(dentry, uid);
+}
+
+SEC("lsm/inode_setxattr")
+int BPF_PROG(ugow_inode_setxattr, struct mnt_idmap *idmap,
+	     struct dentry *dentry, const char *name, const void *value,
+	     __u64 size, int flags)
+{
+	if (!is_target_dentry(dentry))
+		return 0;
+	__u32 uid = current_fsuid();
+	if (uid == 0)
+		return 0;
+	return check_wbit_dentry(dentry, uid);
+}
+
+SEC("lsm/inode_removexattr")
+int BPF_PROG(ugow_inode_removexattr, struct mnt_idmap *idmap,
+	     struct dentry *dentry, const char *name)
+{
+	if (!is_target_dentry(dentry))
+		return 0;
+	__u32 uid = current_fsuid();
+	if (uid == 0)
+		return 0;
 	return check_wbit_dentry(dentry, uid);
 }
 
@@ -155,7 +303,7 @@ int BPF_PROG(ugow_inode_create, struct inode *dir, struct dentry *dentry,
 {
 	if (!is_target_dev(dir))
 		return 0;
-	__u32 uid = bpf_get_current_uid_gid() & 0xFFFFFFFF;
+	__u32 uid = current_fsuid();
 	if (uid == 0)
 		return 0;
 	return check_parent_wbit(dentry, uid);
@@ -167,10 +315,21 @@ int BPF_PROG(ugow_inode_link, struct dentry *old_dentry, struct inode *dir,
 {
 	if (!is_target_dev(dir))
 		return 0;
-	__u32 uid = bpf_get_current_uid_gid() & 0xFFFFFFFF;
+	__u32 uid = current_fsuid();
 	if (uid == 0)
 		return 0;
-	return check_parent_wbit(new_dentry, uid);
+
+	int ret = check_parent_wbit(new_dentry, uid);
+	if (ret)
+		return ret;
+
+	/*
+	 * The new name must not confer rights the existing one lacks: the
+	 * W-bit walk starts from whichever path is used, so a link created
+	 * inside a granted directory would otherwise make a protected file
+	 * writable through its second name.
+	 */
+	return check_wbit_dentry(old_dentry, uid);
 }
 
 SEC("lsm/inode_unlink")
@@ -178,7 +337,7 @@ int BPF_PROG(ugow_inode_unlink, struct inode *dir, struct dentry *dentry)
 {
 	if (!is_target_dev(dir))
 		return 0;
-	__u32 uid = bpf_get_current_uid_gid() & 0xFFFFFFFF;
+	__u32 uid = current_fsuid();
 	if (uid == 0)
 		return 0;
 	return check_parent_wbit(dentry, uid);
@@ -190,7 +349,7 @@ int BPF_PROG(ugow_inode_symlink, struct inode *dir, struct dentry *dentry,
 {
 	if (!is_target_dev(dir))
 		return 0;
-	__u32 uid = bpf_get_current_uid_gid() & 0xFFFFFFFF;
+	__u32 uid = current_fsuid();
 	if (uid == 0)
 		return 0;
 	return check_parent_wbit(dentry, uid);
@@ -202,7 +361,7 @@ int BPF_PROG(ugow_inode_mkdir, struct inode *dir, struct dentry *dentry,
 {
 	if (!is_target_dev(dir))
 		return 0;
-	__u32 uid = bpf_get_current_uid_gid() & 0xFFFFFFFF;
+	__u32 uid = current_fsuid();
 	if (uid == 0)
 		return 0;
 	return check_parent_wbit(dentry, uid);
@@ -213,7 +372,7 @@ int BPF_PROG(ugow_inode_rmdir, struct inode *dir, struct dentry *dentry)
 {
 	if (!is_target_dev(dir))
 		return 0;
-	__u32 uid = bpf_get_current_uid_gid() & 0xFFFFFFFF;
+	__u32 uid = current_fsuid();
 	if (uid == 0)
 		return 0;
 	return check_parent_wbit(dentry, uid);
@@ -224,7 +383,7 @@ int BPF_PROG(ugow_inode_rename, struct inode *old_dir,
 	     struct dentry *old_dentry, struct inode *new_dir,
 	     struct dentry *new_dentry)
 {
-	__u32 uid = bpf_get_current_uid_gid() & 0xFFFFFFFF;
+	__u32 uid = current_fsuid();
 	if (uid == 0)
 		return 0;
 

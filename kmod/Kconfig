@@ -1,14 +1,42 @@
 config SECURITY_UGOW
 	bool "UGOW W-bit permission enforcement for WSL2 drives"
 	depends on SECURITY
+	depends on SECURITYFS
 	default n
 	help
-	  Adds a per-path, per-UID "write bit" that gates all write-class
-	  VFS operations on 9P (drvfs) superblocks in WSL2.
+	  Adds a per-path, per-UID "write bit" that gates write-class VFS
+	  operations on filesystems registered for enforcement -- in practice
+	  the Windows drives WSL2 mounts under /mnt.
+
+	  Enforcement is opt-in per device: nothing is gated until userspace
+	  registers a device, so enabling this option cannot by itself make a
+	  filesystem read-only.
 
 	  Grants are managed via securityfs at:
-	    /sys/kernel/security/ugow/grant
-	    /sys/kernel/security/ugow/revoke
-	    /sys/kernel/security/ugow/grants
+	    /sys/kernel/security/ugow/grant    (write "uid major:minor path")
+	    /sys/kernel/security/ugow/revoke   (write "uid major:minor path")
+	    /sys/kernel/security/ugow/devices  (write "+major:minor" / "-major:minor")
+	    /sys/kernel/security/ugow/grants   (read to list grants)
+
+	  Paths are superblock-relative; the userspace CLI strips the
+	  mountpoint before writing them.
+
+	  SECURITYFS is required: it is the only control interface, and
+	  without it the module has no way to receive grants.
 
 	  If unsure, say N.
+
+config SECURITY_UGOW_ROOT_EXEMPT
+	bool "Exempt root (uid 0) from UGOW W-bit checks"
+	depends on SECURITY_UGOW
+	default y
+	help
+	  When enabled, processes whose filesystem UID is 0 bypass W-bit
+	  checks, matching the BPF backend's behaviour.
+
+	  Say N only if you intend root itself to be gated. Be aware that
+	  system services, package managers and container runtimes routinely
+	  write to mounted Windows drives as root, and will start receiving
+	  EACCES unless you grant uid 0 explicitly.
+
+	  If unsure, say Y.

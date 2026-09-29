@@ -1,6 +1,6 @@
 # CLI Reference
 
-All commands require root (`sudo`). The CLI auto-detects the active backend and syncs grants to all active stores.
+All commands require root (`sudo`). The CLI auto-detects the active backend, but only `allow`, `deny`, and `sync` write to a kernel backend -- `check`, `status`, and `list` read the SQLite store alone, and `mount`/`unmount`/`drives` operate on drive registration rather than grants.
 
 ## `ugow allow`
 
@@ -21,6 +21,13 @@ Grants are inherited -- granting a directory covers all files and subdirectories
 sudo ugow allow ubuntu /mnt/c/docker
 sudo ugow allow 9500 /mnt/c/data
 ```
+
+The grant is pushed to every active kernel backend *before* it is committed to SQLite. If a backend refuses it, nothing is recorded and the command exits `1` -- so `ugow check` can never report a permission the kernel will deny.
+
+!!! warning "BPF mode requires the path to exist"
+    BPF grants are keyed by inode, so `ugow allow` on a path that does not exist yet fails the whole command. Create the path first, then grant it. See [BPF caveats](bpf.md#caveats-inode-keyed-grants).
+
+In BPF mode, `allow` also widens the path's Unix mode if it would block writes at the DAC layer before the LSM hooks run, recording the original mode so `deny` can put it back.
 
 ??? info "ACL mirroring"
     Pass `--mirror-acl` to also create a corresponding NTFS ACL grant on the Windows side via PowerShell. Requires an elevated (Administrator) Windows Terminal session.
@@ -49,6 +56,10 @@ sudo ugow deny <user> <path>
 ```bash
 sudo ugow deny ubuntu /mnt/c/docker
 ```
+
+The revoke order is the reverse of `allow`: SQLite first, then the kernel backends, so a partial failure errs toward denying rather than leaving a stale permission. If a backend reports an error the command still revokes but exits `1` with a warning.
+
+In BPF mode, once no UID holds a grant on the path, `deny` also restores the Unix mode that `allow` widened.
 
 ---
 
@@ -102,6 +113,32 @@ Shows a table of all user/path grants and the active backends (sqlite, bpf, kmod
 
 ---
 
+## `ugow sync`
+
+Replay every SQLite grant into the active kernel backends.
+
+```bash
+sudo ugow sync
+```
+
+The BPF map and the kmod's grant table live in kernel memory and are lost on every `wsl --shutdown`, so they have to be repopulated from the authoritative SQLite store. `ugow-sync.service` is installed and enabled by default and runs this at boot; you only need to invoke it by hand after editing the database directly or after a backend was restarted independently.
+
+If no kernel backend is active the command reports that there is nothing to sync and exits `0`. In BPF mode it delegates to `ugow_manage.py sync`, which flushes stale map entries first. In kmod mode, grants whose path no longer exists are skipped (the device cannot be resolved without it) and reported as such; the SQLite grant stands and applies the next time `sync` runs. Any other backend error makes the command exit `1`.
+
+---
+
+## `ugow acl-cleanup`
+
+Remove mirrored Windows `wsl_<UID>` users that no longer hold any grant.
+
+```bash
+sudo ugow acl-cleanup
+```
+
+ACL mirroring creates a Windows local user per granted UID. Revoking the last grant for a UID drops its NTFS ACEs but leaves the account behind; this command lists the host's `wsl_*` users and deletes the ones whose UID has zero grants in the store. It has no effect if you have never used `--mirror-acl`.
+
+---
+
 ## `ugow mount`
 
 Enable UGOW enforcement on a Windows drive.
@@ -114,7 +151,7 @@ sudo ugow mount <drive>
 |----------|-------------|
 | `drive` | Drive letter (e.g. `d`, `e`, `f`) |
 
-In FUSE mode, this starts a systemd unit for the drive. In BPF mode, this registers the device in the BPF target map.
+In FUSE mode, this starts a systemd unit for the drive. In BPF mode, this registers the device in the BPF target map and records the drive letter in `/var/lib/ugow/drives`, so it is re-registered at the next boot -- device numbers are reassigned on every WSL restart, and a drive left out would come back unenforced.
 
 ```bash
 sudo ugow mount d
@@ -134,7 +171,7 @@ sudo ugow unmount <drive>
 |----------|-------------|
 | `drive` | Drive letter (e.g. `d`, `e`, `f`) |
 
-In FUSE mode, this stops the systemd unit and re-mounts the drive as standard DrvFs. In BPF mode, this removes the device from the BPF target map.
+In FUSE mode, this stops the systemd unit and re-mounts the drive as standard DrvFs. In BPF mode, this removes the device from the BPF target map and drops the drive letter from `/var/lib/ugow/drives`.
 
 ```bash
 sudo ugow unmount d

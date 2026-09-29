@@ -23,7 +23,7 @@ for _p in [os.path.join(os.path.dirname(__file__), ".."), "/opt/ugow/lib"]:
     if os.path.isfile(os.path.join(_p, "permstore.py")):
         sys.path.insert(0, _p)
         break
-from permstore import PermStore, DEFAULT_DB_PATH  # noqa: E402
+from permstore import PermStore, DEFAULT_DB_PATH, kernel_dev  # noqa: E402
 
 log = logging.getLogger("ugow-bpf")
 
@@ -34,6 +34,30 @@ _BPF_SEARCH = [
 BPF_OBJ = next((p for p in _BPF_SEARCH if os.path.isfile(p)), _BPF_SEARCH[0])
 PIN_PATH = "/sys/fs/bpf/ugow"
 
+# Drive letters under UGOW management. BPF pins live in a tmpfs and device
+# numbers are reassigned on every WSL restart, so the set of enforced drives has
+# to be recorded on disk and replayed at boot.
+DRIVES_FILE = "/var/lib/ugow/drives"
+
+
+def read_drives():
+    try:
+        with open(DRIVES_FILE) as f:
+            return [l.strip() for l in f if l.strip()]
+    except FileNotFoundError:
+        return []
+
+
+def write_drives(letters):
+    os.makedirs(os.path.dirname(DRIVES_FILE), exist_ok=True)
+    with open(DRIVES_FILE, "w") as f:
+        for letter in sorted(set(letters)):
+            f.write(letter + "\n")
+
+
+def _letter_of(mount_path):
+    return os.path.basename(os.path.normpath(mount_path)).lower()
+
 
 def run(cmd, check=True):
     log.debug("$ %s", " ".join(cmd))
@@ -41,13 +65,20 @@ def run(cmd, check=True):
 
 
 def stat_path(path):
-    """Return (inode, dev_t) for a filesystem path."""
+    """Return (inode, kernel dev_t) for a filesystem path.
+
+    The device is converted to the kernel's internal encoding, which is what
+    the BPF program reads out of super_block->s_dev -- stat()'s st_dev uses a
+    different layout. See permstore.kernel_dev().
+    """
     st = os.stat(path)
-    return st.st_ino, st.st_dev
+    return st.st_ino, kernel_dev(st.st_dev)
 
 
 def dev_major_minor(dev):
-    return os.major(dev), os.minor(dev)
+    """Split a *kernel-encoded* dev_t. os.major/os.minor decode stat()'s
+    encoding instead, so they are wrong for the values stat_path() returns."""
+    return dev >> 20, dev & 0xFFFFF
 
 
 # -- Map operations via bpftool -------------------------------------------
@@ -156,26 +187,56 @@ def cmd_unload(args):
     log.info("BPF programs unpinned from %s", PIN_PATH)
 
 
+def _dev_key_hex(dev):
+    return " ".join(f"0x{b:02x}" for b in struct.pack("=I", dev))
+
+
+def _add_device(path):
+    _, dev = stat_path(path)
+    map_update(f"{PIN_PATH}/target_devs", _dev_key_hex(dev))
+    major, minor = dev_major_minor(dev)
+    log.info("Added target device %d:%d (%s)", major, minor, path)
+
+
 def cmd_add_device(args):
     """Register a mount's device as a target for enforcement."""
     path = os.path.abspath(args.mount_path)
-    _, dev = stat_path(path)
-    dev_key = struct.pack("=I", dev)
-    key_hex = " ".join(f"0x{b:02x}" for b in dev_key)
-    map_update(f"{PIN_PATH}/target_devs", key_hex)
-    major, minor = dev_major_minor(dev)
-    log.info("Added target device %d:%d (%s)", major, minor, path)
+    _add_device(path)
+    write_drives(read_drives() + [_letter_of(path)])
 
 
 def cmd_remove_device(args):
     """Remove a mount's device from enforcement."""
     path = os.path.abspath(args.mount_path)
     _, dev = stat_path(path)
-    dev_key = struct.pack("=I", dev)
-    key_hex = " ".join(f"0x{b:02x}" for b in dev_key)
-    map_delete(f"{PIN_PATH}/target_devs", key_hex)
+    map_delete(f"{PIN_PATH}/target_devs", _dev_key_hex(dev))
     major, minor = dev_major_minor(dev)
     log.info("Removed target device %d:%d (%s)", major, minor, path)
+    letter = _letter_of(path)
+    write_drives([l for l in read_drives() if l != letter])
+
+
+def cmd_restore_devices(args):
+    """Re-register every recorded drive (run at boot, after `load`)."""
+    letters = read_drives()
+    if not letters:
+        log.info("No drives recorded in %s; nothing to enforce", DRIVES_FILE)
+        return
+    restored, missing = 0, []
+    for letter in letters:
+        path = f"/mnt/{letter}"
+        try:
+            _add_device(path)
+            restored += 1
+        except OSError as e:
+            # Fail loudly: a drive that is mounted but unregistered is
+            # unenforced, and `ugow allow` has already widened its permissions.
+            missing.append(f"{path} ({e})")
+    if missing:
+        log.error("Could not enforce recorded drives: %s", ", ".join(missing))
+    log.info("Restored %d of %d recorded drives", restored, len(letters))
+    if missing:
+        sys.exit(1)
 
 
 def cmd_grant(args):
@@ -284,6 +345,9 @@ def main():
     p = sub.add_parser("remove-device", help="Remove a mount from enforcement")
     p.add_argument("mount_path", help="Mount path (e.g. /mnt/d)")
 
+    sub.add_parser("restore-devices",
+                   help="Re-register all recorded drives (boot-time)")
+
     p = sub.add_parser("grant", help="Grant W-bit")
     p.add_argument("uid", type=int)
     p.add_argument("path")
@@ -312,6 +376,7 @@ def main():
         "unload": cmd_unload,
         "add-device": cmd_add_device,
         "remove-device": cmd_remove_device,
+        "restore-devices": cmd_restore_devices,
         "grant": cmd_grant,
         "revoke": cmd_revoke,
         "sync": cmd_sync,
