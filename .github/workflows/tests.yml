@@ -34,7 +34,11 @@ jobs:
           pip install -r requirements-dev.txt
 
       - name: Run tests
-        run: pytest tests/ -v
+        # The real-mount tests skip when FUSE or passwordless sudo is missing;
+        # here that must fail instead, or the suite could go quietly empty.
+        env:
+          UGOW_FUSE_TESTS: require
+        run: pytest tests/ -v -rs
 
   docs:
     # docs.yml only builds the site on main, as part of deploying it, so a

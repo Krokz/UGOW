@@ -14,6 +14,10 @@ Thanks for your interest in contributing! Here's how to get started.
    ```bash
    pytest
    ```
+   `tests/test_fuse_mount.py` mounts the real shim as root, so it runs only on
+   Linux with `/dev/fuse` and passwordless `sudo`, and is skipped otherwise
+   (`pytest -rs` shows why). CI sets `UGOW_FUSE_TESTS=require`, which turns
+   that skip into a failure.
 4. If you changed the docs, build the site the way CI does:
    ```bash
    pip install -r requirements-docs.txt
