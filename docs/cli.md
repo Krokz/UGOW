@@ -13,9 +13,11 @@ sudo ugow allow <user> <path>
 | Argument | Description |
 |----------|-------------|
 | `user` | Username or numeric UID |
-| `path` | Absolute path to grant write access on |
+| `path` | Path to grant write access on |
 
 Grants are inherited -- granting a directory covers all files and subdirectories beneath it.
+
+The path is resolved before it is stored: made absolute, `..` and duplicate slashes removed, and symlinks followed. The kernel follows a symlink before any backend sees the path, so a grant stored under the link itself would never match. If the resolved path differs from what you typed, `ugow` prints a note. `deny`, `check` and `status` resolve the same way; `deny` also removes a grant stored under the unresolved path by an older version.
 
 ```bash
 sudo ugow allow ubuntu /mnt/c/docker

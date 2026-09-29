@@ -163,6 +163,26 @@ def _bpf_revoke(uid, path):
 
 
 # ---------------------------------------------------------------------------
+# Path resolution
+# ---------------------------------------------------------------------------
+
+def resolve_path(raw):
+    """Return the canonical path a grant for *raw* is stored under.
+
+    Symlinks are resolved because enforcement never sees them: the kernel
+    follows a link before the FUSE shim or an LSM hook is called, so a grant
+    stored under the link's own path would never match. realpath is non-strict,
+    so missing trailing components are kept as typed -- a grant may name a path
+    that does not exist yet.
+    """
+    path = os.path.realpath(raw)
+    typed = os.path.abspath(raw)
+    if path != typed:
+        print(f"  note: {typed} resolves to {path}; using that")
+    return path
+
+
+# ---------------------------------------------------------------------------
 # kmod securityfs helpers
 # ---------------------------------------------------------------------------
 
@@ -186,6 +206,9 @@ def _kmod_key(path):
     expressed the same way, paired with the device so identical relative paths
     on different drives stay distinct.
     """
+    # The kmod renders the dentry the kernel resolved, so the path it is sent
+    # must be resolved too -- including grants stored before paths were.
+    path = os.path.realpath(path)
     st = os.stat(path)
     dev = f"{os.major(st.st_dev)}:{os.minor(st.st_dev)}"
     mount = _mount_point(path)
@@ -276,7 +299,7 @@ def _restore_dac_after_bpf(store, path):
 def cmd_allow(args):
     require_root("allow")
     uid, username = resolve_user(args.user)
-    path = os.path.abspath(args.path)
+    path = resolve_path(args.path)
 
     store = PermStore(db_path=args.db, mirror_acl=args.mirror_acl)
 
@@ -313,13 +336,17 @@ def cmd_allow(args):
 def cmd_deny(args):
     require_root("deny")
     uid, username = resolve_user(args.user)
-    path = os.path.abspath(args.path)
+    path = resolve_path(args.path)
 
     store = PermStore(db_path=args.db, mirror_acl=args.mirror_acl)
 
     # Revoke is the reverse: drop the authoritative record first so a partial
     # failure errs toward denying rather than keeping a stale permission.
     store.revoke(path, uid)
+    # Grants made before paths were resolved are stored as typed.
+    typed = os.path.abspath(args.path)
+    if typed != path:
+        store.revoke(typed, uid)
 
     errors = []
     if _bpf_active():
@@ -348,7 +375,7 @@ def cmd_deny(args):
 
 def cmd_check(args):
     require_root("check")
-    path = os.path.abspath(args.path)
+    path = resolve_path(args.path)
 
     if hasattr(args, "user") and args.user:
         uid, username = resolve_user(args.user)
@@ -368,7 +395,7 @@ def cmd_check(args):
 
 def cmd_status(args):
     require_root("status")
-    path = os.path.abspath(args.path)
+    path = resolve_path(args.path)
     ancestors = set(_path_ancestors(path))
 
     store = PermStore(db_path=args.db, mirror_acl=False)

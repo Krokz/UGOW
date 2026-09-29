@@ -361,6 +361,84 @@ class TestDacRestore:
         assert store.forget_dac_mode(str(target)) is None
 
 
+class TestPathResolution:
+    """Grants are stored under the resolved path, since enforcement never sees links."""
+
+    @pytest.fixture()
+    def args(self, tmp_path):
+        def _make(**kwargs):
+            defaults = {"db": str(tmp_path / "resolve.db"), "mirror_acl": False}
+            defaults.update(kwargs)
+            return types.SimpleNamespace(**defaults)
+        return _make
+
+    @pytest.fixture(autouse=True)
+    def no_kernel_backends(self, monkeypatch):
+        monkeypatch.setattr("os.getuid", lambda: 0)
+        monkeypatch.setattr("cli._bpf_active", lambda: False)
+        monkeypatch.setattr("cli._kmod_active", lambda: False)
+
+    @pytest.fixture()
+    def tree(self, tmp_path):
+        real = tmp_path / "real"
+        real.mkdir()
+        link = tmp_path / "link"
+        link.symlink_to(real)
+        return os.path.realpath(real), str(link)
+
+    def test_allow_through_a_symlink_stores_the_target(self, args, tree, capsys):
+        from cli import cmd_allow
+
+        real, link = tree
+        cmd_allow(args(user="1000", path=link))
+        assert PermStore(db_path=args().db).list_grants() == [(real, 1000)]
+        assert f"resolves to {real}" in capsys.readouterr().out
+
+    def test_missing_leaf_under_a_symlink_is_kept(self, args, tree):
+        from cli import cmd_allow
+
+        real, link = tree
+        cmd_allow(args(user="1000", path=os.path.join(link, "not-yet")))
+        assert PermStore(db_path=args().db).list_grants() == [
+            (os.path.join(real, "not-yet"), 1000)
+        ]
+
+    def test_parent_references_are_stored_normalized(self, args, tree):
+        from cli import cmd_allow
+
+        real, _ = tree
+        cmd_allow(args(user="1000", path=os.path.join(real, "a", "..", "b")))
+        assert PermStore(db_path=args().db).list_grants() == [
+            (os.path.join(real, "b"), 1000)
+        ]
+
+    def test_deny_through_the_symlink_removes_the_grant(self, args, tree):
+        from cli import cmd_allow, cmd_deny
+
+        real, link = tree
+        cmd_allow(args(user="1000", path=real))
+        cmd_deny(args(user="1000", path=link))
+        assert PermStore(db_path=args().db).list_grants() == []
+
+    def test_deny_removes_a_grant_stored_before_resolution(self, args, tree):
+        from cli import cmd_deny
+
+        _, link = tree
+        store = PermStore(db_path=args().db)
+        store.grant(link, 1000)          # how older versions stored it
+        cmd_deny(args(user="1000", path=link))
+        assert store.list_grants() == []
+
+    def test_check_follows_the_symlink(self, args, tree):
+        from cli import cmd_allow, cmd_check
+
+        real, link = tree
+        cmd_allow(args(user="1000", path=real))
+        with pytest.raises(SystemExit) as exc:
+            cmd_check(args(user="1000", path=os.path.join(link, "file")))
+        assert exc.value.code == 0
+
+
 class TestKmodKey:
     """The kmod compares superblock-relative paths, so the CLI must send those."""
 

@@ -112,6 +112,13 @@ class TestPathNormalization:
         store.grant("/mnt/c//data/./sub", 1000)
         assert store.has_wbit("/mnt/c/data/sub", 1000) is True
 
+    def test_parent_references_normalized(self, store):
+        assert normalize_path("/mnt/c/a/b/../c") == "/mnt/c/a/c"
+        store.grant("/mnt/c/data/tmp/../sub", 1000)
+        assert store.list_grants() == [("/mnt/c/data/sub", 1000)]
+        assert store.has_wbit("/mnt/c/data/sub/file", 1000) is True
+        assert store.has_wbit("/mnt/c/data/tmp", 1000) is False
+
     def test_revoke_matches_unnormalized_form(self, store):
         store.grant("/mnt/c/data", 1000)
         store.revoke("/mnt/c/data/", 1000)
