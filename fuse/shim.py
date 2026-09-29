@@ -69,6 +69,23 @@ class UGOWShim(Operations):
         if not self.store.has_wbit(self._grant_path(parent), uid):
             self._deny(op, parent, uid, "no W permission on parent")
 
+    def _give_to_caller(self, full):
+        """Hand a newly created entry to the user who created it.
+
+        The shim runs as root, so everything it creates starts out owned by
+        root, and the creator could not chmod its own files. This uses the
+        real caller uid, not the launcher remap: a root caller keeps root
+        ownership. It is best-effort, since the backing mount keeps ownership
+        only with `metadata`, and failing an operation whose entry already
+        exists would be worse than a wrong owner.
+        """
+        uid, gid, _ = fuse_get_context()
+        try:
+            os.lchown(full, uid, gid)
+        except OSError as e:
+            log.warning("could not give %s to uid=%d: %s",
+                        self._grant_path(full), uid, e)
+
     def _full_path(self, path):
         full = os.path.abspath(os.path.join(self.root, path.lstrip("/")))
         if not (full == self.root or full.startswith(self.root + os.sep)):
@@ -152,8 +169,13 @@ class UGOWShim(Operations):
         full = self._full_path(path)
         self._require_parent_wbit("create", full, self._effective_uid())
         # fusepy's create() carries no flags, so O_EXCL cannot be honoured here;
-        # the kernel's lookup-then-create path decides existence instead.
-        return os.open(full, os.O_WRONLY | os.O_CREAT, _safe_mode(mode))
+        # the kernel's lookup-then-create path decides existence instead. Only
+        # an entry this call created changes owner.
+        existed = os.path.lexists(full)
+        fd = os.open(full, os.O_WRONLY | os.O_CREAT, _safe_mode(mode))
+        if not existed:
+            self._give_to_caller(full)
+        return fd
 
     def read(self, path, size, offset, fh):
         # Positioned I/O: fusepy dispatches multithreaded, so a shared
@@ -193,7 +215,8 @@ class UGOWShim(Operations):
     def mkdir(self, path, mode):
         full = self._full_path(path)
         self._require_parent_wbit("mkdir", full, self._effective_uid())
-        return os.mkdir(full, _safe_mode(mode))
+        os.mkdir(full, _safe_mode(mode))
+        self._give_to_caller(full)
 
     def rmdir(self, path):
         full = self._full_path(path)
@@ -218,7 +241,8 @@ class UGOWShim(Operations):
         """Create a symlink at *target* pointing to *source*."""
         new_link = self._full_path(target)
         self._require_parent_wbit("symlink", new_link, self._effective_uid())
-        return os.symlink(source, new_link)
+        os.symlink(source, new_link)
+        self._give_to_caller(new_link)
 
     def link(self, target, source):
         """Create a hard link at *target* referencing *source*."""

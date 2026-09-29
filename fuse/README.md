@@ -50,6 +50,11 @@ the mode stored on the drive, but not who can write: the shim reports each
 caller's W-bit in place of the stored write bits, and the kernel's permission
 check uses that reported mode.
 
+Files, directories and symlinks created through the shim belong to the user who
+created them -- their real UID and GID, not the root-remapped one -- rather than
+to root, which the shim runs as. The backing mount keeps ownership only because
+it is mounted with `metadata`.
+
 ---
 
 ## Prerequisites
