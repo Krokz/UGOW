@@ -1,7 +1,7 @@
 # Kernel Module
 
 !!! danger "Experimental and unverified"
-    The kernel module backend is **not covered by the installer** and has **never been compiled or booted** against a real WSL2 kernel. The source has been substantially rewritten and reviewed, but nothing here has been validated on hardware -- treat every claim below as intent rather than observed behaviour. For kernel-level enforcement today, use [BPF mode](bpf.md).
+    The kernel module backend is **not covered by the installer** and has **never been booted**. CI compiles it into WSL's 6.6 and 6.18 kernel trees, but nothing here has been validated on a running kernel -- treat every claim below as intent rather than observed behaviour. For kernel-level enforcement today, use [BPF mode](bpf.md).
 
 A Linux Security Module that enforces W-bit permissions directly in the kernel VFS layer, on the mounted filesystems userspace has registered for enforcement -- in practice the Windows drives WSL2 mounts under `/mnt`.
 
@@ -15,7 +15,7 @@ A Linux Security Module that enforces W-bit permissions directly in the kernel V
 ```bash
 git clone https://github.com/microsoft/WSL2-Linux-Kernel.git
 cd WSL2-Linux-Kernel
-git checkout linux-msft-wsl-6.6.y   # or latest stable branch
+git checkout linux-msft-wsl-6.6.y   # or linux-msft-wsl-6.18.y
 ```
 
 ### 2. Copy the UGOW LSM source
@@ -39,6 +39,18 @@ Add to `security/Kconfig`:
 source "security/ugow/Kconfig"
 ```
 
+On WSL's 6.18 series (and any kernel from 6.12 on), also count UGOW in the
+kernel's fixed LSM total:
+
+```bash
+patch -p1 < security/ugow/lsm_count.patch
+```
+
+Those kernels size their LSM tables from the list in
+`include/linux/lsm_count.h`. An LSM missing from it is dropped at boot whenever
+every other built-in LSM is active, so the build stops with an `#error` until
+the patch is applied. 6.6 has no such list and needs no patch.
+
 ### 4. Enable in kernel config
 
 ```bash
@@ -61,8 +73,10 @@ make -j$(nproc)
 
     If `%USERPROFILE%\.wslconfig` sets `kernelCommandLine = lsm=...`, the kernel
     ignores `CONFIG_LSM` and enables only the modules named there -- so `ugow`
-    is silently skipped and nothing is enforced, no matter how the kernel was
-    configured. The BPF setup instructions tell you to add exactly such a line,
+    is skipped and nothing is enforced, no matter how the kernel was
+    configured. The kmod then does not create `/sys/kernel/security/ugow/`
+    (and logs `ugow: not in the active LSM list`), so the CLI stops detecting
+    it instead of accepting grants no hook checks. The BPF setup instructions tell you to add exactly such a line,
     so this is easy to hit if you have used both backends.
 
     Either remove the `lsm=` line, or append `,ugow` to it. Keep `apparmor` in
@@ -165,7 +179,7 @@ The LSM hooks into the kernel's VFS layer at these points:
 
 Every gated operation first checks that the superblock's device is registered and that the caller is not exempt, both of which are cheap and happen before any allocation. Grants live in a kernel hash table with RCU-based read access for lock-free lookups on the hot path. Inheritance walks up the relative path component by component, so a grant on `/data` covers `/data/sub/file.txt`, and a grant on `/` covers the whole device.
 
-The hooks are armed only *after* securityfs is set up successfully. LSM hooks cannot be unregistered, so arming first and then failing to create the control interface would leave enforcement active with no way to add a grant.
+The hooks are armed at LSM init, and the securityfs interface is created later from an initcall, since securityfs cannot be used that early in boot. Arming first is harmless: nothing is enforced until a device is registered through that interface. The interface is only created if the hooks were armed, so an LSM left out of the boot order shows no control files rather than ones that accept grants nothing enforces.
 
 ## Persistence Across Reboots
 

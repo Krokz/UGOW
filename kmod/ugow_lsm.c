@@ -23,6 +23,8 @@
  * (9p, drvfs, virtiofs).
  *
  * Build: compile into a custom WSL2-Linux-Kernel with CONFIG_SECURITY_UGOW=y.
+ * Builds against WSL's 6.6 and 6.18 series; on 6.12 and later the kernel also
+ * needs lsm_count.patch (see kmod/README.md).
  */
 
 #include <linux/lsm_hooks.h>
@@ -38,6 +40,17 @@
 #include <linux/seq_file.h>
 #include <linux/uaccess.h>
 #include <linux/kdev_t.h>
+#include <linux/version.h>
+
+/*
+ * Since 6.12 the kernel sizes its per-hook static call tables and its LSM
+ * order from the fixed list in <linux/lsm_count.h>.  An LSM missing from that
+ * list only gets a slot when another built-in LSM happens to be inactive;
+ * otherwise it is dropped at boot and enforces nothing.
+ */
+#if defined(__LINUX_LSM_COUNT_H) && !defined(UGOW_ENABLED)
+#error "include/linux/lsm_count.h does not count UGOW: apply kmod/lsm_count.patch"
+#endif
 
 #define UGOW_NAME	"ugow"
 #define UGOW_HT_BITS	10		/* 1024 buckets */
@@ -447,7 +460,13 @@ static int ugow_inode_rename(struct inode *old_dir, struct dentry *old_dentry,
 			  ATTR_ATIME | ATTR_MTIME | \
 			  ATTR_ATIME_SET | ATTR_MTIME_SET)
 
+/* Linux 6.9 prepended the mount's idmap to this hook. */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 9, 0)
+static int ugow_inode_setattr(struct mnt_idmap *idmap, struct dentry *dentry,
+			      struct iattr *attr)
+#else
 static int ugow_inode_setattr(struct dentry *dentry, struct iattr *attr)
+#endif
 {
 	if (!(attr->ia_valid & UGOW_GATED_ATTRS))
 		return 0;
@@ -808,9 +827,32 @@ static int __init ugow_securityfs_init(void)
 	return 0;
 }
 
+/*
+ * Since 6.8 an LSM identifies itself by a struct lsm_id rather than its name.
+ * Upstream hands out IDs from 100 upward in sequence (uapi/linux/lsm.h), so
+ * UGOW takes one far from that range.  The kernel only compares IDs; userspace
+ * sees them through lsm_list_modules(2).
+ */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 8, 0)
+#ifndef LSM_ID_UGOW
+#define LSM_ID_UGOW	0x55474f57	/* "UGOW" */
+#endif
+static const struct lsm_id ugow_lsmid = {
+	.name	= UGOW_NAME,
+	.id	= LSM_ID_UGOW,
+};
+#define UGOW_LSM_ID	(&ugow_lsmid)
+#else
+#define UGOW_LSM_ID	UGOW_NAME
+#endif
+
+/* Set once the hooks are armed; see ugow_fs_init(). */
+static bool ugow_initialized __ro_after_init;
+
 static int __init ugow_init(void)
 {
-	security_add_hooks(ugow_hooks, ARRAY_SIZE(ugow_hooks), UGOW_NAME);
+	security_add_hooks(ugow_hooks, ARRAY_SIZE(ugow_hooks), UGOW_LSM_ID);
+	ugow_initialized = true;
 	pr_info("ugow: W-bit LSM initialized (no device enforced until registered)\n");
 	return 0;
 }
@@ -834,7 +876,20 @@ DEFINE_LSM(ugow) = {
  */
 static int __init ugow_fs_init(void)
 {
-	int err = ugow_securityfs_init();
+	int err;
+
+	/*
+	 * An LSM left out of the boot order -- by lsm=, by CONFIG_LSM, or for
+	 * want of a static call slot -- never has ugow_init() called, but this
+	 * initcall still runs.  Creating the interface anyway would let the CLI
+	 * detect the kmod and accept grants that no hook will ever check.
+	 */
+	if (!ugow_initialized) {
+		pr_warn("ugow: not in the active LSM list; control interface not created, nothing is enforced\n");
+		return 0;
+	}
+
+	err = ugow_securityfs_init();
 
 	if (err) {
 		ugow_remove_securityfs();

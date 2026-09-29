@@ -34,8 +34,8 @@ defaults:
     shell: bash
 
 env:
-  # 6.6 is the series kmod/README.md builds against; 6.18 is the newest
-  # series WSL ships, which the BPF backend runs on unmodified.
+  # The two series WSL ships: the BPF backend runs on either unmodified, and
+  # kmod/README.md documents building the kmod into either.
   WSL_KERNELS: linux-msft-wsl-6.6.123.2 linux-msft-wsl-6.18.40.1
   BPFTOOL_VERSION: v7.7.0
 
@@ -102,16 +102,10 @@ jobs:
     name: kmod (${{ matrix.kernel }})
     runs-on: ubuntu-24.04
     timeout-minutes: 30
-    # The kmod is documented against 6.6 only; 6.18 is tracked, not required.
-    continue-on-error: ${{ matrix.experimental }}
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - kernel: linux-msft-wsl-6.6.123.2
-            experimental: false
-          - kernel: linux-msft-wsl-6.18.40.1
-            experimental: true
+        kernel: [linux-msft-wsl-6.6.123.2, linux-msft-wsl-6.18.40.1]
     env:
       KSRC: ${{ github.workspace }}/../linux
     steps:
@@ -137,6 +131,10 @@ jobs:
           printf '%s\n' 'subdir-$(CONFIG_SECURITY_UGOW) += ugow' \
                         'obj-$(CONFIG_SECURITY_UGOW) += ugow/' >> security/Makefile
           echo 'source "security/ugow/Kconfig"' >> security/Kconfig
+          # 6.12+ sizes its LSM tables from lsm_count.h, which must count UGOW.
+          if [[ -f include/linux/lsm_count.h ]]; then
+            patch -p1 < security/ugow/lsm_count.patch
+          fi
           cp Microsoft/config-wsl .config
           scripts/config --enable CONFIG_SECURITY_UGOW
           scripts/config --set-str CONFIG_LSM "landlock,lockdown,yama,loadpin,safesetid,integrity,apparmor,bpf,ugow"

@@ -54,4 +54,4 @@ Open an issue with:
 
 ## Scope
 
-The FUSE and BPF backends are the primary focus. The kmod backend is experimental, unverified against a real kernel build, and not integrated into the installer, so contributions there are welcome but may take longer to review.
+The FUSE and BPF backends are the primary focus. The kmod backend is experimental: CI compiles it against WSL's 6.6 and 6.18 kernels, but it has never been booted and is not integrated into the installer, so contributions there are welcome but may take longer to review.
