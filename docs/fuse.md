@@ -31,6 +31,8 @@ Write-class VFS operations -- `access` (for `W_OK`), `open`, `create`, `truncate
 
 `chmod` and `utimens` are metadata writes and gated like any other write: the shim runs as root, so an ungated `chmod` would let any caller re-mode every file on the drive. `chmod` additionally masks off the `setuid` and `setgid` bits, which buy nothing on a Windows drive and would be a privilege-escalation primitive. `link` requires the W-bit on the source file as well as the destination parent, so a second name can never confer rights the first one lacked. `chown` remains root-only, tested against the real caller UID rather than the root-remapped one.
 
+Mode bits never grant or revoke write access -- the W-bit comes only from `ugow allow` and `ugow deny`. A granted user's `chmod +w` or `chmod -w` changes the mode stored on the drive, but not who can write: the shim reports each caller's W-bit in place of the stored write bits, and the kernel's permission check uses that reported mode.
+
 ## Prerequisites
 
 ```bash

@@ -188,6 +188,16 @@ docker run --user 9500 \
 
 The container (UID 9500) will be able to write under `/data` only if you granted its W-bit.
 
+> **Containers running as root.** Docker runs a container as root unless you
+> pass `--user`, and each backend treats root differently:
+>
+> - **BPF** exempts root unconditionally, so a root container can write
+>   anywhere on an enforced drive. Always pass `--user`.
+> - **FUSE** remaps root to the user who launched the shim, so a root container
+>   gets that user's grants.
+> - **kmod** exempts root unless the kernel was built with
+>   `CONFIG_SECURITY_UGOW_ROOT_EXEMPT=n`.
+
 ---
 
 ## Architecture

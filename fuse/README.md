@@ -44,6 +44,12 @@ requires the W-bit on the source file as well as the destination parent, so a
 second name never confers rights the first one lacked. `chown` remains
 root-only, tested against the real caller UID rather than the root-remapped one.
 
+Mode bits never grant or revoke write access -- the W-bit comes only from
+`ugow allow` and `ugow deny`. A granted user's `chmod +w` or `chmod -w` changes
+the mode stored on the drive, but not who can write: the shim reports each
+caller's W-bit in place of the stored write bits, and the kernel's permission
+check uses that reported mode.
+
 ---
 
 ## Prerequisites
