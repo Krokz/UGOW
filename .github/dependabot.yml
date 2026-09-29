@@ -1,0 +1,20 @@
+# Weekly update PRs for the pinned Python requirements and the GitHub Actions
+# versions. They target dev, like every other change, and must pass the
+# required checks before reaching main.
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+    target-branch: dev
+    ignore:
+      # MkDocs 2.0 drops the plugin and theme-override systems the docs use.
+      - dependency-name: mkdocs
+        versions: [">=2"]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    target-branch: dev

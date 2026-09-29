@@ -14,6 +14,14 @@ Thanks for your interest in contributing! Here's how to get started.
    ```bash
    pytest
    ```
+4. If you changed the docs, build the site the way CI does:
+   ```bash
+   pip install -r requirements-docs.txt
+   mkdocs build --strict
+   ```
+
+Dependencies are pinned exactly; Dependabot opens weekly PRs against `dev` to
+update them.
 
 ## Testing on WSL2
 
