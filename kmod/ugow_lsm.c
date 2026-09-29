@@ -421,8 +421,10 @@ static int ugow_inode_mkdir(struct inode *dir, struct dentry *dentry,
 	return ugow_gate_parent(dentry);
 }
 
-/* inode_create only covers regular files; without this, FIFOs, sockets and
- * device nodes could be created in a directory the caller has no grant on. */
+/*
+ * inode_create only covers regular files; without this, FIFOs, sockets and
+ * device nodes could be created in a directory the caller has no grant on.
+ */
 static int ugow_inode_mknod(struct inode *dir, struct dentry *dentry,
 			    umode_t mode, dev_t dev)
 {
@@ -473,8 +475,10 @@ static int ugow_inode_setattr(struct dentry *dentry, struct iattr *attr)
 	return ugow_gate(dentry->d_sb, dentry);
 }
 
-/* Extended attributes carry ACLs and capabilities, so writing them is a
- * privileged metadata change like chmod. */
+/*
+ * Extended attributes carry ACLs and capabilities, so writing them is a
+ * privileged metadata change like chmod.
+ */
 static int ugow_inode_setxattr(struct mnt_idmap *idmap, struct dentry *dentry,
 			       const char *name, const void *value,
 			       size_t size, int flags)
@@ -893,8 +897,8 @@ static int __init ugow_fs_init(void)
 
 	if (err) {
 		ugow_remove_securityfs();
-		pr_err("ugow: securityfs setup failed (%d); no grants can be "
-		       "added, so nothing will be enforced\n", err);
+		pr_err("ugow: securityfs setup failed (%d); no grants can be added, so nothing will be enforced\n",
+		       err);
 	}
 	return err;
 }
